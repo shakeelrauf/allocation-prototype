@@ -1,0 +1,26 @@
+# Open-source LLM sidecar: Ollama (pull models like llama3.2, phi3, gemma2 — see ollama.com/library).
+# No Docker? On macOS use: ./scripts/setup_local_llm.sh install-ollama && ./scripts/setup_local_llm.sh native
+#
+# Start:
+#   docker compose -f docker-compose.llm.yml up -d
+#
+# Download a model (first time; ~2–5 GB for llama3.2 depending on tag):
+#   docker compose -f docker-compose.llm.yml exec ollama ollama pull llama3.2
+#
+# Point Newton at it:
+#   export NEWTON3_LLM_URL=http://127.0.0.1:11434/v1/chat/completions
+#   export NEWTON3_LLM_MODEL=llama3.2
+#
+# Docs: https://github.com/ollama/ollama/blob/main/docs/openai.md
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_models:

@@ -1,0 +1,3 @@
+# Runtime dependencies for the Docker image (API + SQLite; no pytest).
+fastapi>=0.110
+uvicorn[standard]>=0.27

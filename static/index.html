@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Newton 3.0 — Control centre</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js" defer></script>
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <h1>Newton 3.0</h1>
+        <p class="muted">Full local console · SQLite · behaviour scoring & allocation</p>
+      </div>
+      <div class="actions">
+        <button
+          type="button"
+          id="btn-refresh-global"
+          title="Deletes all local users, groups, events, scores, and tenant config, then reloads"
+        >
+          Reset all data
+        </button>
+        <span id="health-pill" class="pill">…</span>
+      </div>
+    </header>
+
+    <div id="feature-badges" class="badges" aria-label="Feature flags"></div>
+
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <button type="button" class="tab active" data-tab="dash" role="tab" aria-selected="true">Dashboard</button>
+      <button type="button" class="tab" data-tab="events" role="tab">Events</button>
+      <button type="button" class="tab" data-tab="alloc" role="tab">Allocation</button>
+      <button type="button" class="tab" data-tab="intel" role="tab">Explain &amp; AI</button>
+      <button type="button" class="tab" data-tab="admin" role="tab">Tenant admin</button>
+    </nav>
+
+    <!-- Dashboard -->
+    <section id="panel-dash" class="panel active" data-panel="dash" role="tabpanel">
+      <div class="grid-inner">
+        <article class="card">
+          <h2>Groups &amp; users</h2>
+          <p class="muted small">
+            Add a <strong>group</strong> first (team / parking pool), then register <strong>users</strong>. Lower group priority ranks earlier in allocation.
+          </p>
+          <div class="row-inline mt">
+            <button type="button" id="btn-open-modal-group">New group</button>
+            <button type="button" class="secondary" id="btn-open-modal-user">New user</button>
+          </div>
+        </article>
+
+        <article class="card">
+          <h2>Quick stats</h2>
+          <dl class="stats" id="dash-stats">
+            <div><dt>Groups</dt><dd id="stat-groups">—</dd></div>
+            <div><dt>Users</dt><dd id="stat-users">—</dd></div>
+            <div><dt>Events (loaded)</dt><dd id="stat-events">—</dd></div>
+          </dl>
+          <p class="muted small">Use tabs above for streams, ranking, shadow mode, and tenant weights.</p>
+        </article>
+
+        <article class="card wide charts-card">
+          <h2>Overview charts</h2>
+          <p class="muted small">
+            Built from the same data as the tables below (users + loaded recent events). Resize the window or reload tables to refresh.
+          </p>
+          <p id="charts-lib-missing" class="callout err" hidden>Chart library did not load (offline or blocked CDN).</p>
+          <div class="charts-grid">
+            <div class="chart-panel">
+              <h3 class="subh">Behaviour scores by user</h3>
+              <div class="chart-canvas-wrap" id="wrap-chart-scores">
+                <canvas id="chart-scores" aria-label="Behaviour scores by user"></canvas>
+              </div>
+              <p id="fallback-chart-scores" class="muted small chart-fallback" hidden>No users yet.</p>
+            </div>
+            <div class="chart-panel">
+              <h3 class="subh">Tier mix</h3>
+              <div class="chart-canvas-wrap chart-canvas-wrap--compact" id="wrap-chart-tiers">
+                <canvas id="chart-tiers" aria-label="User count by tier"></canvas>
+              </div>
+              <p id="fallback-chart-tiers" class="muted small chart-fallback" hidden>No users yet.</p>
+            </div>
+            <div class="chart-panel chart-span-full">
+              <h3 class="subh">Recent events by type</h3>
+              <div class="chart-canvas-wrap" id="wrap-chart-events">
+                <canvas id="chart-event-types" aria-label="Event counts by type"></canvas>
+              </div>
+              <p id="fallback-chart-events" class="muted small chart-fallback" hidden>No events in the loaded window.</p>
+            </div>
+          </div>
+        </article>
+
+        <article class="card wide">
+          <div class="row">
+            <h2>Users</h2>
+            <div class="row-inline">
+              <label class="inline">
+                <span class="muted">Show score</span>
+                <input type="checkbox" id="dash-users-scores" checked />
+              </label>
+              <button type="button" class="secondary sm" id="btn-dash-reload-users">Reload table</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table id="tbl-users">
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th>Group</th>
+                  <th>G/U prio</th>
+                  <th class="col-sc">Score</th>
+                  <th class="col-ti">Tier</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card wide">
+          <div class="row">
+            <h2>Recent events</h2>
+            <div class="row-inline">
+              <label class="inline">
+                Limit
+                <input type="number" id="events-limit" value="40" min="5" max="200" class="w-short" />
+              </label>
+              <button type="button" class="secondary sm" id="btn-events-reload">Reload</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table id="tbl-events">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Type</th>
+                  <th>User</th>
+                  <th>Payload</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- Events -->
+    <section id="panel-events" class="panel" data-panel="events" role="tabpanel" hidden>
+      <div class="grid-inner">
+        <article class="card">
+          <h2>Send single event</h2>
+          <form id="form-event" class="stack" onsubmit="return false;">
+            <label>
+              Event type
+              <select name="event_type" id="event-type"></select>
+            </label>
+            <label>
+              User
+              <select name="user_id" id="event-user-id" required></select>
+            </label>
+            <label>
+              Payload JSON
+              <textarea name="payload" rows="4" id="event-payload" placeholder='{"weeks": 2}'></textarea>
+            </label>
+            <div class="preset-row">
+              <span class="muted small">Presets:</span>
+              <button type="button" class="secondary sm preset-btn" data-payload='{"weeks":1}'>weekly_decay ×1</button>
+              <button type="button" class="secondary sm preset-btn" data-payload='{"weeks":4}'>weekly_decay ×4</button>
+              <button type="button" class="secondary sm preset-btn" data-payload="{}">clear payload</button>
+            </div>
+            <button type="button" id="btn-submit-event">Process event</button>
+          </form>
+          <div id="event-result" class="callout" hidden></div>
+        </article>
+
+        <article class="card wide">
+          <h2>Event stream (NDJSON)</h2>
+          <p class="muted small">
+            One JSON object per line:
+            <code>{"event_type":"unused_booking","user_id":"bob","payload":{}}</code>
+          </p>
+          <textarea id="bulk-ndjson" rows="10" class="mono" placeholder='{"event_type":"carpool.detected","user_id":"alice","payload":{}}'></textarea>
+          <div class="row-inline mt">
+            <button type="button" id="btn-bulk-sample">Insert sample stream</button>
+            <button type="button" class="secondary" id="btn-bulk-run">Run bulk (server-side)</button>
+            <span id="bulk-status" class="muted small"></span>
+          </div>
+          <pre id="bulk-result" class="mono muted scroll-max" hidden></pre>
+        </article>
+      </div>
+    </section>
+
+    <!-- Allocation -->
+    <section id="panel-alloc" class="panel" data-panel="alloc" role="tabpanel" hidden>
+      <div class="grid-inner">
+        <article class="card wide">
+          <h2>Pool &amp; seed</h2>
+          <p class="muted small">Choose who competes for spaces. Lower group priority value = higher preferred group.</p>
+          <div id="alloc-picks" class="pick-grid"></div>
+          <div class="row-inline mt">
+            <button type="button" class="secondary sm" id="btn-pick-all">Select all</button>
+            <button type="button" class="secondary sm" id="btn-pick-none">Clear</button>
+            <label class="inline">
+              Seed
+              <input type="number" id="alloc-seed" value="42" class="w-short" />
+            </label>
+          </div>
+        </article>
+
+        <article class="card">
+          <h2>Full ranking</h2>
+          <button type="button" id="btn-run-rank">Compute ranking</button>
+          <div class="table-wrap mt">
+            <table id="tbl-rank">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>User</th>
+                  <th>Score</th>
+                  <th>Tier</th>
+                  <th>Explain</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card">
+          <h2>Allocate capacity</h2>
+          <label class="stack">
+            Spaces available
+            <input type="number" id="alloc-capacity" value="2" min="1" max="99" />
+          </label>
+          <button type="button" id="btn-run-allocate" class="mt">Run allocation</button>
+          <div id="alloc-winners" class="callout mt" hidden></div>
+        </article>
+      </div>
+    </section>
+
+    <!-- Explain & AI -->
+    <section id="panel-intel" class="panel" data-panel="intel" role="tabpanel" hidden>
+      <div class="grid-inner">
+        <article class="card wide">
+          <div class="row-inline wrap">
+            <label>
+              Focus user
+              <select id="intel-focus"></select>
+            </label>
+            <label class="inline">
+              Seed
+              <input type="number" id="intel-seed" value="42" class="w-short" />
+            </label>
+            <button type="button" id="btn-intel-explain">Why this rank?</button>
+            <button type="button" class="secondary" id="btn-intel-shadow">Shadow vs legacy</button>
+            <button type="button" class="secondary" id="btn-intel-history">Score history</button>
+            <button type="button" class="secondary" id="btn-intel-insights">Insights / risk</button>
+          </div>
+        </article>
+
+        <article class="card wide" id="box-explain" hidden>
+          <h2>Explainability</h2>
+          <p id="intel-narrative" class="narrative"></p>
+          <h3 class="subh">Users ranked above focus</h3>
+          <div class="table-wrap">
+            <table id="tbl-above">
+              <thead>
+                <tr>
+                  <th>Rank</th>
+                  <th>User</th>
+                  <th>Explain</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card wide" id="box-shadow" hidden>
+          <h2>Shadow mode — Newton vs mock legacy</h2>
+          <p class="muted small">Legacy ignores behaviour score; only group &amp; user priority + tie-break.</p>
+          <div class="split">
+            <div>
+              <h3 class="subh">Newton 3</h3>
+              <div class="table-wrap">
+                <table id="tbl-newton">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>User</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+            <div>
+              <h3 class="subh">Mock legacy</h3>
+              <div class="table-wrap">
+                <table id="tbl-legacy">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>User</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <h3 class="subh">Rank delta (Newton − legacy)</h3>
+          <div class="table-wrap">
+            <table id="tbl-diff">
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th>Newton</th>
+                  <th>Legacy</th>
+                  <th>Δ</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card wide" id="box-history" hidden>
+          <h2>Score &amp; tier history</h2>
+          <div class="table-wrap">
+            <table id="tbl-history">
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>Event</th>
+                  <th>Score</th>
+                  <th>Tier</th>
+                  <th>Applied</th>
+                  <th>Detail</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card wide" id="box-insights" hidden>
+          <h2>Insights &amp; anomaly</h2>
+          <div id="insights-body" class="insights-grid"></div>
+        </article>
+
+        <article class="card wide">
+          <h2>LLM narrative</h2>
+          <label class="stack">
+            Extra context for the model
+            <textarea id="llm-context" rows="3" placeholder="e.g. Sales off-site week; engineering peak occupancy Tuesday."></textarea>
+          </label>
+          <button type="button" id="btn-llm" class="mt">Generate narrative</button>
+          <div id="llm-out" class="llm-box mt" hidden></div>
+        </article>
+      </div>
+    </section>
+
+    <!-- Admin -->
+    <section id="panel-admin" class="panel" data-panel="admin" role="tabpanel" hidden>
+      <div class="grid-inner">
+        <article class="card wide">
+          <h2>Tenant weights (per group_id)</h2>
+          <p class="muted small">Overrides default penalties/rewards/decay for users in that group.</p>
+          <form id="form-tenant" class="tenant-form" onsubmit="return false;">
+            <label>
+              Group
+              <select name="group_id" id="tenant-group-select" required></select>
+            </label>
+            <div class="weights-grid">
+              <label>no_show <input name="no_show" type="number" step="0.5" value="3" /></label>
+              <label>free_space <input name="free_space" type="number" step="0.5" value="1" /></label>
+              <label>offence <input name="offence" type="number" step="0.5" value="5" /></label>
+              <label>carpool <input name="carpool" type="number" step="0.5" value="5" /></label>
+              <label>decay_per_week <input name="decay_per_week" type="number" step="0.5" value="2" /></label>
+              <label>reward_cap_total <input name="reward_cap_total" type="number" step="0.5" value="20" /></label>
+              <label>reward_cap_window_days <input name="reward_cap_window_days" type="number" step="1" value="28" /></label>
+            </div>
+            <div class="row-inline mt">
+              <button type="button" class="secondary" id="btn-tenant-load">Load current</button>
+              <button type="button" id="btn-submit-tenant">Save tenant config</button>
+            </div>
+          </form>
+          <div id="tenant-result" class="callout mt" hidden></div>
+        </article>
+      </div>
+    </section>
+
+    <!-- Create group modal -->
+    <div id="modal-group-backdrop" class="modal-backdrop" hidden aria-hidden="true">
+      <div class="modal" role="dialog" aria-labelledby="modal-group-title">
+        <header class="modal-head">
+          <h2 id="modal-group-title">Create group</h2>
+          <button type="button" class="icon-btn" id="modal-group-close" aria-label="Close">×</button>
+        </header>
+        <div class="modal-body">
+          <p class="muted small">
+            Define a team / parking pool. Lower <strong>group priority</strong> number ranks earlier in allocation.
+          </p>
+          <form id="form-group" class="stack mt" onsubmit="return false;">
+            <label>Group id <input name="group_id" required placeholder="engineering" autocomplete="off" /></label>
+            <label>Group priority <input name="group_priority" type="number" value="1" /></label>
+            <button type="button" id="btn-submit-group">Create / update group</button>
+          </form>
+          <div id="group-result" class="callout mt" hidden></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Register user modal -->
+    <div id="modal-user-backdrop" class="modal-backdrop" hidden aria-hidden="true">
+      <div class="modal" role="dialog" aria-labelledby="modal-user-title">
+        <header class="modal-head">
+          <h2 id="modal-user-title">Register user</h2>
+          <button type="button" class="icon-btn" id="modal-user-close" aria-label="Close">×</button>
+        </header>
+        <div class="modal-body">
+          <p class="muted small">Pick an existing group, then set this user’s individual priority.</p>
+          <form id="form-user" class="stack mt" onsubmit="return false;">
+            <label>User id <input name="user_id" required placeholder="alice" autocomplete="off" /></label>
+            <label>
+              Group
+              <select id="form-user-group" name="group_id" required></select>
+            </label>
+            <input type="hidden" name="group_priority" id="form-user-group-priority" value="100" />
+            <p class="muted small" id="form-user-group-meta"></p>
+            <label>User priority <input name="user_priority" type="number" value="10" /></label>
+            <button type="button" id="btn-submit-user">Save user</button>
+          </form>
+          <div id="user-result" class="callout mt" hidden></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- User detail modal -->
+    <div id="modal-backdrop" class="modal-backdrop" hidden aria-hidden="true">
+      <div class="modal" role="dialog" aria-labelledby="modal-title">
+        <header class="modal-head">
+          <h2 id="modal-title">Behaviour score</h2>
+          <button type="button" class="icon-btn" id="modal-close" aria-label="Close">×</button>
+        </header>
+        <div id="modal-body" class="modal-body"></div>
+        <footer class="modal-foot muted small">
+          REST:
+          <code id="modal-rest-path"></code>
+        </footer>
+      </div>
+    </div>
+
+    <footer class="muted page-foot">
+      API <code>/api/*</code> · Spec alias <code>/users/{id}/behavior-score</code> ·
+      <code>NEWTON3_DB_PATH</code> · <code>NEWTON3_LLM_URL</code> / Ollama auto-detect ·
+      <code>NEWTON3_LOG_JSON=1</code>
+    </footer>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

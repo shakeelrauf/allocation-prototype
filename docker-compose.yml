@@ -1,0 +1,62 @@
+# Full stack in one command: React UI (built into image) + FastAPI + SQLite + Ollama + model pull.
+#
+#   docker compose up --build
+#
+# First startup waits for Ollama health, then pulls NEWTON3_LLM_MODEL (default llama3.2), then starts Newton.
+# Open: http://127.0.0.1:8765
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+    # Probes run inside this container (127.0.0.1 in logs). Long start_period avoids
+    # counting failures while tensors load ("llm server loading model").
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 45s
+      retries: 40
+      start_period: 180s
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      NEWTON3_LLM_MODEL: ${NEWTON3_LLM_MODEL:-llama3.2}
+    volumes:
+      - ./scripts/compose_ollama_pull.sh:/compose_ollama_pull.sh:ro
+    entrypoint: ["/bin/sh", "/compose_ollama_pull.sh"]
+    restart: "no"
+
+  newton:
+    build: .
+    ports:
+      - "8765:8765"
+    environment:
+      NEWTON3_DB_PATH: /data/newton3.db
+      NEWTON3_LLM_URL: http://ollama:11434/v1/chat/completions
+      NEWTON3_LLM_MODEL: ${NEWTON3_LLM_MODEL:-llama3.2}
+      # Smaller prompts + keep model loaded — Docker Ollama is usually CPU-only vs native GPU.
+      NEWTON3_LLM_SNAPSHOT_EVENTS_LOOKBACK: "72"
+      NEWTON3_LLM_SNAPSHOT_MAX_EVENT_LINES: "35"
+      NEWTON3_LLM_KEEP_ALIVE: "15m"
+      NEWTON3_LLM_MAX_TOKENS: "320"
+    volumes:
+      - newton_data:/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  newton_data:
+  ollama_models:
