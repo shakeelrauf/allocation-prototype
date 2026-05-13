@@ -1,5 +1,5 @@
 # Newton 3.0
-
+Demo URL https://www.loom.com/share/fe1813ab3d1940a1890a9c8107c91d29
 Behaviour scoring and space-allocation prototype: FastAPI backend, React UI, SQLite persistence, optional LLM explanations (Ollama-compatible).
 
 ## Run everything (recommended)
