@@ -1,6 +1,17 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchJson } from "../api/client";
 import { useData } from "../context/DataContext";
+import { UserSearchSelect } from "./UserSearchSelect";
+import { UserLabel } from "../utils/userDisplay";
+import {
+  IntelAiHeader,
+  IntelExplainLadder,
+  IntelIntroFlow,
+  IntelShadowCompare,
+  IntelToolGrid,
+  type IntelToolId,
+} from "./IntelFlowVisual";
+import type { FocusDetail } from "./IntelFocusBreakdown";
 import { InsightsPanel, type InsightsBundle } from "./InsightsPanel";
 import { LlmMessageBody } from "./LlmMessageBody";
 
@@ -11,10 +22,11 @@ type LlmChatTurn = {
 };
 
 type ShadowPayload = {
-  newton: { rank: number; user_id: string }[];
-  legacy_mock: { rank: number; user_id: string }[];
+  newton: { rank: number; user_id: string; user_name?: string }[];
+  legacy_mock: { rank: number; user_id: string; user_name?: string }[];
   diff: {
     user_id: string;
+    user_name?: string;
     newton_rank: number | null;
     legacy_rank: number | null;
     delta_newton_minus_legacy: number | null;
@@ -22,12 +34,15 @@ type ShadowPayload = {
 };
 
 export function IntelTab() {
-  const { API, users, getPoolUserIds, health } = useData();
+  const { API, users, getPoolUserIds, health, formatUser } = useData();
   const aiName = String(health?.features?.llm_character ?? "Shakeel").trim() || "Shakeel";
+  const poolCount = getPoolUserIds().length;
   const [seed, setSeed] = useState(42);
   const [focus, setFocus] = useState("");
-  const [narrative, setNarrative] = useState("");
-  const [above, setAbove] = useState<{ rank: number; user_id: string; explain: string }[]>([]);
+  const [focusDetail, setFocusDetail] = useState<FocusDetail | null>(null);
+  const [above, setAbove] = useState<
+    { rank: number; user_id: string; user_name?: string; explain: string }[]
+  >([]);
   const [showExplain, setShowExplain] = useState(false);
 
   const [shadow, setShadow] = useState<ShadowPayload | null>(null);
@@ -42,6 +57,8 @@ export function IntelTab() {
   const [insightsBundle, setInsightsBundle] = useState<InsightsBundle | null>(null);
   const [showInsights, setShowInsights] = useState(false);
 
+  const [toolBusy, setToolBusy] = useState<IntelToolId | null>(null);
+
   const [llmChat, setLlmChat] = useState<LlmChatTurn[]>([]);
   const [llmDraft, setLlmDraft] = useState("");
   const [llmBusy, setLlmBusy] = useState(false);
@@ -49,6 +66,24 @@ export function IntelTab() {
   const llmEndRef = useRef<HTMLDivElement>(null);
 
   const idsParam = () => getPoolUserIds().join(",");
+
+  const focusUser = useMemo(
+    () => users.find((u) => u.user_id === focus),
+    [users, focus],
+  );
+
+  const focusLabel = focus ? formatUser(focus, focusUser?.user_name) : "";
+  const focusRank = above.length > 0 ? above[above.length - 1].rank + 1 : above.length === 0 && showExplain ? 1 : above.length + 1;
+
+  const activePanel: IntelToolId | null = showExplain
+    ? "explain"
+    : showShadow
+      ? "shadow"
+      : showHistory
+        ? "history"
+        : showInsights
+          ? "insights"
+          : null;
 
   useEffect(() => {
     llmEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -75,11 +110,19 @@ export function IntelTab() {
       window.alert("Pick focus user and ensure pool has users.");
       return;
     }
+    setToolBusy("explain");
     try {
       const ex = await fetchJson<{
         error?: string;
         narrative?: string;
-        users_above?: { rank: number; user_id: string; explain: string }[];
+        focus_detail?: FocusDetail;
+        users_above?: {
+          rank: number;
+          user_id: string;
+          user_name?: string;
+          explain: string;
+          reason?: string;
+        }[];
       }>(
         `${API}/allocation/explain?user_ids=${encodeURIComponent(ids)}&focus=${encodeURIComponent(f)}&seed=${seed}`,
       );
@@ -87,11 +130,23 @@ export function IntelTab() {
         window.alert(ex.error);
         return;
       }
-      setNarrative(ex.narrative || "");
-      setAbove(ex.users_above || []);
+      setFocusDetail(ex.focus_detail ?? null);
+      setAbove(
+        (ex.users_above || []).map((r) => ({
+          rank: r.rank,
+          user_id: r.user_id,
+          user_name: r.user_name,
+          explain: r.reason || r.explain,
+        })),
+      );
       setShowExplain(true);
+      setShowShadow(false);
+      setShowHistory(false);
+      setShowInsights(false);
     } catch (e) {
       window.alert(String(e instanceof Error ? e.message : e));
+    } finally {
+      setToolBusy(null);
     }
   }
 
@@ -101,14 +156,20 @@ export function IntelTab() {
       window.alert("No users in pool.");
       return;
     }
+    setToolBusy("shadow");
     try {
       const sh = await fetchJson<ShadowPayload>(
         `${API}/allocation/shadow?user_ids=${encodeURIComponent(ids)}&seed=${seed}`,
       );
       setShadow(sh);
       setShowShadow(true);
+      setShowExplain(false);
+      setShowHistory(false);
+      setShowInsights(false);
     } catch (e) {
       window.alert(String(e instanceof Error ? e.message : e));
+    } finally {
+      setToolBusy(null);
     }
   }
 
@@ -118,6 +179,7 @@ export function IntelTab() {
       window.alert("Select focus user.");
       return;
     }
+    setToolBusy("history");
     try {
       const data = await fetchJson<{ snapshots?: typeof historyRows; note?: string }>(
         `${API}/users/${encodeURIComponent(f)}/score-history?limit=40`,
@@ -125,8 +187,13 @@ export function IntelTab() {
       setHistoryRows(data.snapshots || []);
       setHistoryNote(data.note && !(data.snapshots || []).length ? data.note : "");
       setShowHistory(true);
+      setShowExplain(false);
+      setShowShadow(false);
+      setShowInsights(false);
     } catch (e) {
       window.alert(String(e instanceof Error ? e.message : e));
+    } finally {
+      setToolBusy(null);
     }
   }
 
@@ -136,6 +203,7 @@ export function IntelTab() {
       window.alert("Select focus user.");
       return;
     }
+    setToolBusy("insights");
     try {
       const data = await fetchJson<{ anomaly: unknown; no_show: unknown; ensemble: unknown }>(
         `${API}/users/${encodeURIComponent(f)}/insights`,
@@ -146,9 +214,21 @@ export function IntelTab() {
         ensemble: data.ensemble as InsightsBundle["ensemble"],
       });
       setShowInsights(true);
+      setShowExplain(false);
+      setShowShadow(false);
+      setShowHistory(false);
     } catch (e) {
       window.alert(String(e instanceof Error ? e.message : e));
+    } finally {
+      setToolBusy(null);
     }
+  }
+
+  function runTool(id: IntelToolId) {
+    if (id === "explain") void runExplain();
+    else if (id === "history") void runHistory();
+    else if (id === "insights") void runInsights();
+    else if (id === "shadow") void runShadow();
   }
 
   function appendAssistantOnly(res: {
@@ -234,114 +314,88 @@ export function IntelTab() {
     setLlmMeta("");
   }
 
+  const computedFocusRank =
+    above.length > 0 ? above[above.length - 1].rank + 1 : 1;
+
   return (
-    <div className="grid-inner">
-        <article className="card wide">
-          <div className="row-inline wrap">
-            <label>
-              Focus user
-              <select value={focus} onChange={(e) => setFocus(e.target.value)}>
-                <option value="">{users.length ? "Select user…" : "No users — register first"}</option>
-                {users.map((u) => (
-                  <option key={u.user_id} value={u.user_id}>
-                    {u.user_id} ({u.tier})
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="inline">
-              Seed
-              <input className="w-short" type="number" value={seed} onChange={(e) => setSeed(Number(e.target.value))} />
-            </label>
-            <button type="button" onClick={() => void runExplain()}>
-              Why this rank?
-            </button>
-            <button type="button" className="secondary" onClick={() => void runHistory()}>
-              Score history
-            </button>
-            <button type="button" className="secondary" onClick={() => void runInsights()}>
-              Insights / risk
-            </button>
+    <div className="grid-inner intel-page">
+      <article className="card wide intel-hero">
+        <h2>Explain &amp; AI</h2>
+        <p className="muted small">
+          Understand <strong>why</strong> someone ranks where they do, compare Newton to legacy rules,
+          and chat with your allocation guide.
+        </p>
+        <IntelIntroFlow
+          poolCount={poolCount}
+          focusLabel={focusLabel}
+          hasFocus={!!focus.trim()}
+        />
+      </article>
+
+      <article className="card wide intel-controls">
+        <div className="intel-controls-row">
+          <div className="intel-focus-search">
+            <UserSearchSelect
+              label="Focus person"
+              value={focus}
+              onChange={setFocus}
+              users={users}
+              everyoneLabel={users.length ? "Select user…" : undefined}
+              placeholder="Search name or user id…"
+            />
+            {focus ? (
+              <span className="intel-focus-selected muted small">
+                Selected: <UserLabel userId={focus} userName={focusUser?.user_name} />
+              </span>
+            ) : null}
           </div>
+          <label className="inline stack-tight">
+            <span className="muted small">Seed (match Parking tab)</span>
+            <input
+              className="w-short"
+              type="number"
+              value={seed}
+              onChange={(e) => setSeed(Number(e.target.value))}
+            />
+          </label>
+        </div>
+        <IntelToolGrid
+          hasFocus={!!focus.trim()}
+          activePanel={activePanel}
+          busy={toolBusy}
+          onRun={runTool}
+        />
+      </article>
+
+      {showExplain && (
+        <article className="card wide intel-panel intel-panel--explain" id="box-explain">
+          <div className="intel-panel-head">
+            <h2>Why this rank?</h2>
+            <span className="allocation-outcome-pointer win">Step A → ladder below</span>
+          </div>
+          <IntelExplainLadder
+            focusUserId={focus}
+            focusUserName={focusUser?.user_name}
+            focusRank={focusDetail?.rank ?? computedFocusRank}
+            above={above}
+            focusDetail={focusDetail}
+          />
         </article>
+      )}
 
-        {showExplain && (
-          <article className="card wide" id="box-explain">
-            <h2>Explainability</h2>
-            <p className="narrative">{narrative}</p>
-            <h3 className="subh">Users ranked above focus</h3>
-            <div className="table-wrap">
-              <table id="tbl-above">
-                <thead>
-                  <tr>
-                    <th>Rank</th>
-                    <th>User</th>
-                    <th>Explain</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {above.map((r) => (
-                    <tr key={r.user_id + r.rank}>
-                      <td>{r.rank}</td>
-                      <td>{r.user_id}</td>
-                      <td>{r.explain}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </article>
-        )}
-
-        {showShadow && shadow && (
-          <article className="card wide" id="box-shadow">
-            <h2>Shadow mode — Newton vs mock legacy</h2>
-            <p className="muted small">Legacy ignores behaviour score; only group &amp; user priority + tie-break.</p>
-            <div className="split">
-              <div>
-                <h3 className="subh">Newton 3</h3>
-                <div className="table-wrap">
-                  <table id="tbl-newton">
-                    <thead>
-                      <tr>
-                        <th>#</th>
-                        <th>User</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(shadow.newton || []).map((r) => (
-                        <tr key={r.user_id}>
-                          <td>{r.rank}</td>
-                          <td>{r.user_id}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-              <div>
-                <h3 className="subh">Mock legacy</h3>
-                <div className="table-wrap">
-                  <table id="tbl-legacy">
-                    <thead>
-                      <tr>
-                        <th>#</th>
-                        <th>User</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(shadow.legacy_mock || []).map((r) => (
-                        <tr key={r.user_id}>
-                          <td>{r.rank}</td>
-                          <td>{r.user_id}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-            <h3 className="subh">Rank delta (Newton − legacy)</h3>
+      {showShadow && shadow && (
+        <article className="card wide intel-panel intel-panel--shadow" id="box-shadow">
+          <div className="intel-panel-head">
+            <h2>Shadow mode</h2>
+            <span className="allocation-outcome-pointer wait">Step D → Newton vs legacy</span>
+          </div>
+          <IntelShadowCompare
+            newton={shadow.newton || []}
+            legacy={shadow.legacy_mock || []}
+            diff={shadow.diff || []}
+          />
+          <details className="insight-raw mt">
+            <summary>Full rank delta table</summary>
             <div className="table-wrap">
               <table id="tbl-diff">
                 <thead>
@@ -355,11 +409,14 @@ export function IntelTab() {
                 <tbody>
                   {(shadow.diff || []).map((d) => (
                     <tr key={d.user_id}>
-                      <td>{d.user_id}</td>
+                      <td>
+                        <UserLabel userId={d.user_id} userName={d.user_name} />
+                      </td>
                       <td>{d.newton_rank ?? "—"}</td>
                       <td>{d.legacy_rank ?? "—"}</td>
                       <td>
-                        {d.delta_newton_minus_legacy === null || d.delta_newton_minus_legacy === undefined
+                        {d.delta_newton_minus_legacy === null ||
+                        d.delta_newton_minus_legacy === undefined
                           ? "—"
                           : d.delta_newton_minus_legacy}
                       </td>
@@ -368,143 +425,158 @@ export function IntelTab() {
                 </tbody>
               </table>
             </div>
-          </article>
-        )}
+          </details>
+        </article>
+      )}
 
-        {showHistory && (
-          <article className="card wide" id="box-history">
+      {showHistory && (
+        <article className="card wide intel-panel intel-panel--history" id="box-history">
+          <div className="intel-panel-head">
             <h2>Score &amp; tier history</h2>
-            <div className="table-wrap">
-              <table id="tbl-history">
-                <thead>
-                  <tr>
-                    <th>When</th>
-                    <th>Event</th>
-                    <th>Score</th>
-                    <th>Tier</th>
-                    <th>Applied</th>
-                    <th>Detail</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {historyNote ? (
-                    <tr>
-                      <td colSpan={6}>{historyNote}</td>
-                    </tr>
-                  ) : (
-                    historyRows.map((s, i) => (
-                      <tr key={i}>
-                        <td>{s.created_at || ""}</td>
-                        <td>{s.event_type}</td>
-                        <td>{Number(s.score).toFixed(2)}</td>
-                        <td>{s.tier}</td>
-                        <td>{s.applied ? "yes" : "no"}</td>
-                        <td>{s.detail}</td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </article>
-        )}
-
-        {showInsights && insightsBundle && (
-          <article className="card wide" id="box-insights">
-            <h2>Insights &amp; risk signals</h2>
-            <p className="muted small insight-intro">
-              Plain-language readouts from Newton&apos;s built-in heuristics — useful for triage, not a substitute for
-              your policies or ground truth.
-            </p>
-            <InsightsPanel bundle={insightsBundle} />
-          </article>
-        )}
-
-        <article className="card wide">
-          <h2>LLM chat</h2>
-          <p className="muted small">
-            Ranking is refreshed from the pool and seed on every send. First send can be blank for a default summary.
-          </p>
-          <div className="llm-chat-actions">
-            <button type="button" className="secondary" disabled={llmBusy || llmChat.length === 0} onClick={clearLlmChat}>
-              Clear conversation
-            </button>
-            {llmMeta ? <span className="muted small">{llmMeta}</span> : null}
+            <span className="allocation-outcome-pointer win">
+              Step B → <UserLabel userId={focus} userName={focusUser?.user_name} />
+            </span>
           </div>
-          <div className="llm-chat-panel mt">
-            <div className="llm-chat" aria-live="polite">
-              {llmChat.length === 0 ? (
-                <div className="llm-host-welcome">
-                  <div className="llm-host-avatar" aria-hidden="true">
-                    {aiName.slice(0, 1).toUpperCase()}
-                  </div>
-                  <div className="llm-host-copy">
-                    <p className="llm-host-greeting">
-                      Hi — I&apos;m <strong>{aiName}</strong>, your Newton 3 allocation guide.
-                    </p>
-                    <p className="muted small">
-                      Ask anything about the ranking, say hi, or press <strong>Send</strong> with an empty box and
-                      I&apos;ll give you a short default walkthrough.
-                    </p>
-                  </div>
-                </div>
-              ) : (
-                llmChat.map((turn, i) => (
-                  <div
-                    key={i}
-                    className={
-                      "llm-msg " +
-                      (turn.role === "user" ? "llm-msg-user" : "llm-msg-assistant") +
-                      (turn.tone === "error" ? " llm-msg-tone-error" : "")
-                    }
-                  >
-                    {turn.role === "assistant" ? (
-                      <>
-                        <div className="llm-msg-from">{aiName}</div>
-                        <LlmMessageBody content={turn.content} />
-                      </>
-                    ) : (
-                      turn.content
-                    )}
-                  </div>
-                ))
-              )}
-              {llmBusy ? <div className="muted small llm-chat-meta">Thinking…</div> : null}
-              <div ref={llmEndRef} />
-            </div>
-            <div className="llm-follow-row mt">
-              <input
-                type="text"
-                value={llmDraft}
-                onChange={(e) => setLlmDraft(e.target.value)}
-                placeholder={
-                  llmChat.length === 0
-                    ? "Prompt: ask about the ranking, fairness, or leave blank for a short tour…"
-                    : "Prompt: follow-up question…"
-                }
-                disabled={llmBusy}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    void sendLlmMessage();
-                  }
-                }}
-              />
-              <button
-                type="button"
-                disabled={
-                  llmBusy ||
-                  !idsParam() ||
-                  (llmChat.length > 0 && !llmDraft.trim())
-                }
-                onClick={() => void sendLlmMessage()}
-              >
-                Send
-              </button>
-            </div>
+          <div className="table-wrap">
+            <table id="tbl-history">
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>Event</th>
+                  <th>Score</th>
+                  <th>Tier</th>
+                  <th>Applied</th>
+                  <th>Detail</th>
+                </tr>
+              </thead>
+              <tbody>
+                {historyNote ? (
+                  <tr>
+                    <td colSpan={6}>{historyNote}</td>
+                  </tr>
+                ) : (
+                  historyRows.map((s, i) => (
+                    <tr key={i}>
+                      <td>{s.created_at || ""}</td>
+                      <td>{s.event_type}</td>
+                      <td>{Number(s.score).toFixed(2)}</td>
+                      <td>{s.tier}</td>
+                      <td>{s.applied ? "yes" : "no"}</td>
+                      <td>{s.detail}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
         </article>
-      </div>
+      )}
+
+      {showInsights && insightsBundle && (
+        <article className="card wide intel-panel intel-panel--insights" id="box-insights">
+          <div className="intel-panel-head">
+            <h2>Insights &amp; risk signals</h2>
+            <span className="allocation-outcome-pointer win">
+              Step C → signals for focus user
+            </span>
+          </div>
+          <p className="muted small insight-intro">
+            A short overall verdict plus three plain checks — no statistics degree required.
+          </p>
+          <InsightsPanel bundle={insightsBundle} />
+        </article>
+      )}
+
+      <article className="card wide intel-llm-card">
+        <IntelAiHeader aiName={aiName} poolCount={poolCount} />
+        <div className="llm-chat-actions">
+          <button
+            type="button"
+            className="secondary"
+            disabled={llmBusy || llmChat.length === 0}
+            onClick={clearLlmChat}
+          >
+            Clear conversation
+          </button>
+          {llmMeta ? <span className="muted small">{llmMeta}</span> : null}
+        </div>
+        <div className="llm-chat-panel intel-llm-panel mt">
+          <div className="llm-chat" aria-live="polite">
+            {llmChat.length === 0 ? (
+              <div className="llm-host-welcome intel-llm-welcome">
+                <div className="llm-host-avatar intel-llm-avatar" aria-hidden="true">
+                  {aiName.slice(0, 1).toUpperCase()}
+                </div>
+                <div className="llm-host-copy">
+                  <p className="llm-host-greeting">
+                    Hi — I&apos;m <strong>{aiName}</strong>, your Newton 3 allocation guide.
+                  </p>
+                  <ul className="intel-llm-starters muted small">
+                    <li>Why is my rank lower than someone on another team?</li>
+                    <li>What would move me up one spot?</li>
+                    <li>Press Send with an empty box for a short tour of this pool</li>
+                  </ul>
+                </div>
+              </div>
+            ) : (
+              llmChat.map((turn, i) => (
+                <div
+                  key={i}
+                  className={
+                    "llm-msg " +
+                    (turn.role === "user" ? "llm-msg-user" : "llm-msg-assistant") +
+                    (turn.tone === "error" ? " llm-msg-tone-error" : "")
+                  }
+                >
+                  {turn.role === "assistant" ? (
+                    <>
+                      <div className="llm-msg-from">{aiName}</div>
+                      <LlmMessageBody content={turn.content} />
+                    </>
+                  ) : (
+                    turn.content
+                  )}
+                </div>
+              ))
+            )}
+            {llmBusy ? (
+              <div className="llm-chat-meta intel-llm-thinking">
+                <span className="intel-llm-dots" aria-hidden>
+                  ···
+                </span>{" "}
+                Thinking…
+              </div>
+            ) : null}
+            <div ref={llmEndRef} />
+          </div>
+          <div className="llm-follow-row mt">
+            <input
+              type="text"
+              value={llmDraft}
+              onChange={(e) => setLlmDraft(e.target.value)}
+              placeholder={
+                llmChat.length === 0
+                  ? "Ask about ranking, fairness, or leave blank for a short tour…"
+                  : "Follow-up question…"
+              }
+              disabled={llmBusy}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void sendLlmMessage();
+                }
+              }}
+            />
+            <button
+              type="button"
+              disabled={llmBusy || !idsParam() || (llmChat.length > 0 && !llmDraft.trim())}
+              onClick={() => void sendLlmMessage()}
+            >
+              Send
+            </button>
+          </div>
+        </div>
+      </article>
+    </div>
   );
 }
-

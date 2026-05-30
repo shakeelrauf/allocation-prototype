@@ -1,4 +1,8 @@
 data/
+fixtures/complaint_cohort/generated/
+fixtures/complaint_cohort/*.csv
+fixtures/migration/*.csv
+!fixtures/**/README.md
 __pycache__/
 *.pyc
 .pytest_cache/

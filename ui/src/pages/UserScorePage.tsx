@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { API, fetchJson, usersBehaviorScoreUrl } from "../api/client";
+import { formatUserLabel } from "../utils/userDisplay";
 
 type ScorePayload = {
   user_id: string;
+  user_name?: string;
   group_id: string;
   score: number;
   tier: string;
@@ -46,7 +48,7 @@ export function UserScorePage() {
     <div className="grid-inner">
       <article className="card wide">
         <div className="row">
-          <h2>Behaviour · {userId}</h2>
+          <h2>Behaviour · {data ? formatUserLabel(data.user_id, data.user_name) : userId}</h2>
           <div className="row-inline">
             <button type="button" className="secondary sm" onClick={() => navigate(-1)}>
               Back

@@ -51,6 +51,7 @@ class UserProfile:
     group_id: str
     group_priority: int = 100
     user_priority: int = 100
+    user_name: str = ""
 
 
 @dataclass

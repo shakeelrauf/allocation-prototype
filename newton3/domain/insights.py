@@ -5,8 +5,8 @@ from __future__ import annotations
 import statistics
 from typing import Any
 
-from models import EventType, tier_for_score
-from store import ScoreStore
+from newton3.domain.models import EventType, tier_for_score
+from newton3.persistence.store import ScoreStore
 
 
 def score_anomaly(store: ScoreStore, user_id: str) -> dict[str, Any]:

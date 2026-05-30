@@ -1,4 +1,14 @@
-"""Optional allocation narrative via **Ollama** (local), or a deterministic template.
+"""Optional allocation narrative via **Ollama** (local), **Amazon Bedrock** (AWS), or template.
+
+**AWS:** set ``NEWTON3_LLM_BACKEND=bedrock`` and ``NEWTON3_BEDROCK_MODEL_ID`` (Console Lambda in SAM).
+Uses the Bedrock **Converse** API (``boto3`` ``bedrock-runtime``). Enable the model in the Bedrock
+console for your region before deploy.
+
+**Local:** Ollama auto-detect or ``NEWTON3_LLM_URL`` (unchanged when Bedrock env is not set).
+
+---
+
+Optional allocation narrative via **Ollama** (local), or a deterministic template.
 
 Pull models from https://ollama.com/library. Ollama exposes chat at ``/v1/chat/completions``.
 Quick start from repo root::
@@ -43,9 +53,9 @@ import json
 import os
 from typing import Any, Iterable
 
-from allocation_engine import allocate_spaces
-from models import BehaviorEvent, tier_for_score
-from store import ScoreStore
+from newton3.domain.allocation_engine import allocate_spaces
+from newton3.domain.models import BehaviorEvent, tier_for_score
+from newton3.persistence.store import ScoreStore
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -113,7 +123,110 @@ def _reset_llm_auto_probe() -> None:
     _auto_probe_url = None
 
 
+def _llm_backend_mode() -> str:
+    return (os.environ.get("NEWTON3_LLM_BACKEND") or "auto").strip().lower()
+
+
+def _bedrock_model_id() -> str:
+    return (os.environ.get("NEWTON3_BEDROCK_MODEL_ID") or "").strip()
+
+
+def bedrock_configured() -> bool:
+    """True when Bedrock Converse should be used (AWS Console Lambda)."""
+    mode = _llm_backend_mode()
+    model = _bedrock_model_id()
+    if mode in ("bedrock", "aws"):
+        return bool(model)
+    if mode == "auto" and model:
+        return True
+    return False
+
+
+def _bedrock_region() -> str:
+    explicit = (os.environ.get("NEWTON3_BEDROCK_REGION") or "").strip()
+    if explicit:
+        return explicit
+    return (
+        os.environ.get("AWS_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION")
+        or "eu-west-1"
+    )
+
+
+def _messages_for_bedrock_converse(
+    messages: list[dict[str, str]],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]] | None]:
+    """Split system prompt from user/assistant turns for Converse API."""
+    system_blocks: list[dict[str, str]] = []
+    converse_messages: list[dict[str, Any]] = []
+    for m in messages:
+        role = (m.get("role") or "user").strip()
+        content = str(m.get("content") or "")
+        if role == "system":
+            system_blocks.append({"text": content})
+        elif role in ("user", "assistant"):
+            converse_messages.append({"role": role, "content": [{"text": content}]})
+    system = system_blocks or None
+    return converse_messages, system
+
+
+def _post_bedrock_converse(
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int = 400,
+    temperature: float = 0.25,
+    timeout: float = 120.0,
+) -> str:
+    """Call Amazon Bedrock Converse API (requires IAM on Lambda)."""
+    model_id = _bedrock_model_id()
+    if not model_id:
+        raise RuntimeError("NEWTON3_BEDROCK_MODEL_ID is not set")
+
+    try:
+        import boto3
+        from botocore.config import Config
+    except ImportError as e:
+        raise RuntimeError("boto3 is required for Bedrock backend") from e
+
+    region = _bedrock_region()
+    cfg = Config(
+        read_timeout=max(int(timeout), 30),
+        connect_timeout=15,
+        retries={"max_attempts": 2},
+    )
+    client = boto3.client("bedrock-runtime", region_name=region, config=cfg)
+    converse_messages, system = _messages_for_bedrock_converse(messages)
+    if not converse_messages:
+        raise RuntimeError("No user/assistant messages for Bedrock")
+
+    kwargs: dict[str, Any] = {
+        "modelId": model_id,
+        "messages": converse_messages,
+        "inferenceConfig": {
+            "maxTokens": max(64, min(max_tokens, 4096)),
+            "temperature": max(0.0, min(2.0, temperature)),
+        },
+    }
+    if system:
+        kwargs["system"] = system
+
+    try:
+        response = client.converse(**kwargs)
+    except Exception as e:
+        raise RuntimeError(f"Bedrock Converse failed: {e}") from e
+
+    try:
+        for block in response["output"]["message"]["content"]:
+            if isinstance(block, dict) and block.get("text"):
+                return str(block["text"])
+    except (KeyError, TypeError) as e:
+        raise RuntimeError(f"Unexpected Bedrock response: {response!r}") from e
+    raise RuntimeError(f"Bedrock returned no text: {response!r}")
+
+
 def _llm_auto_enabled() -> bool:
+    if bedrock_configured():
+        return False
     raw = os.environ.get("NEWTON3_LLM_AUTO", "1").strip().lower()
     return raw not in ("0", "false", "no", "off")
 
@@ -385,6 +498,42 @@ def enrich_with_llm(
         [{"role": "system", "content": _build_system_prompt()}] + hist + [{"role": "user", "content": user_content}]
     )
 
+    try:
+        max_tok = int(os.environ.get("NEWTON3_LLM_MAX_TOKENS", "400"))
+    except ValueError:
+        max_tok = 400
+    try:
+        timeout = float(os.environ.get("NEWTON3_LLM_TIMEOUT", "120"))
+    except ValueError:
+        timeout = 120.0
+    try:
+        temp_raw = os.environ.get("NEWTON3_LLM_TEMPERATURE", "0.25").strip()
+        llm_temperature = float(temp_raw)
+    except ValueError:
+        llm_temperature = 0.25
+    token_cap = max(64, min(max_tok, 4096))
+
+    if bedrock_configured():
+        try:
+            text = _post_bedrock_converse(
+                full_messages,
+                max_tokens=token_cap,
+                timeout=timeout,
+                temperature=llm_temperature,
+            )
+            text = _coerce_markdown_reply(text, base)
+            return {
+                "mode": "bedrock",
+                "text": text,
+                "template_fallback": base,
+                "llm_source": "bedrock",
+                "llm_model": _bedrock_model_id(),
+                "llm_region": _bedrock_region(),
+                "echo_user": user_content,
+            }
+        except Exception as e:
+            return {"mode": "error", "error": str(e), "text": base, "echo_user": user_content}
+
     chat_url = os.environ.get("NEWTON3_LLM_URL", "").strip()
     if not chat_url:
         chat_url = _detect_local_ollama_chat_url() or ""
@@ -393,22 +542,12 @@ def enrich_with_llm(
         model = (os.environ.get("NEWTON3_LLM_MODEL") or "llama3.2").strip() or "llama3.2"
         api_key = os.environ.get("NEWTON3_LLM_API_KEY", "").strip() or None
         try:
-            timeout = float(os.environ.get("NEWTON3_LLM_TIMEOUT", "120"))
-        except ValueError:
-            timeout = 120.0
-        max_tok = int(os.environ.get("NEWTON3_LLM_MAX_TOKENS", "400"))
-        try:
-            temp_raw = os.environ.get("NEWTON3_LLM_TEMPERATURE", "0.25").strip()
-            try:
-                llm_temperature = float(temp_raw)
-            except ValueError:
-                llm_temperature = 0.25
             text = _post_ollama_chat(
                 chat_url,
                 model,
                 full_messages,
                 bearer=api_key,
-                max_tokens=max(64, min(max_tok, 4096)),
+                max_tokens=token_cap,
                 timeout=timeout,
                 temperature=llm_temperature,
             )
@@ -440,7 +579,16 @@ def enrich_with_llm(
 
 
 def llm_feature_flags() -> dict[str, Any]:
-    """For /api/health: whether Ollama is considered available."""
+    """For /api/health: LLM backend availability (Bedrock on AWS, Ollama locally)."""
+    if bedrock_configured():
+        return {
+            "llm_explain_env": True,
+            "llm_backend": "bedrock",
+            "llm_auto_ollama": False,
+            "llm_bedrock_model": _bedrock_model_id(),
+            "llm_bedrock_region": _bedrock_region(),
+            "llm_character": _llm_character_name(),
+        }
     explicit = bool(os.environ.get("NEWTON3_LLM_URL", "").strip())
     auto_hit = bool(not explicit and _detect_local_ollama_chat_url())
     ollama_on = explicit or auto_hit

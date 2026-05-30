@@ -1,6 +1,6 @@
-from models import BehaviorEvent, EventType, UserProfile
-from event_processor import process_event, seed_users
-from store import InMemoryStore
+from newton3.domain.models import BehaviorEvent, EventType, UserProfile
+from newton3.domain.event_processor import process_event, seed_users
+from newton3.persistence.store import InMemoryStore
 
 
 def test_no_show_then_decay_recovery():

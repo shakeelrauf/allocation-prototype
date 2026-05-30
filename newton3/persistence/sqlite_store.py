@@ -7,15 +7,17 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from models import AllocationResult, BehaviorEvent, UserProfile, UserScoreState, tier_for_score, utcnow
-from tenant_weights import TenantWeights
+from newton3.domain.models import AllocationResult, BehaviorEvent, UserProfile, UserScoreState, tier_for_score, utcnow
+from newton3.persistence.store import _attach_score_deltas
+from newton3.domain.tenant_weights import TenantWeights
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
     group_id TEXT NOT NULL,
     group_priority INTEGER NOT NULL,
-    user_priority INTEGER NOT NULL
+    user_priority INTEGER NOT NULL,
+    user_name TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS scores (
@@ -92,7 +94,9 @@ CREATE INDEX IF NOT EXISTS idx_alloc_winners_run ON allocation_winners (run_id, 
 
 
 def default_sqlite_path() -> Path:
-    base = Path(__file__).resolve().parent / "data"
+    from newton3.paths import REPO_ROOT
+
+    base = REPO_ROOT / "data"
     base.mkdir(parents=True, exist_ok=True)
     return base / "newton3.db"
 
@@ -110,7 +114,23 @@ class SqliteStore:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        self._migrate_users_user_name()
+        self._migrate_snapshots_score_before()
         self._conn.commit()
+
+    def _migrate_users_user_name(self) -> None:
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(users)")}
+        if "user_name" not in cols:
+            self._conn.execute(
+                "ALTER TABLE users ADD COLUMN user_name TEXT NOT NULL DEFAULT ''"
+            )
+
+    def _migrate_snapshots_score_before(self) -> None:
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(score_snapshots)")}
+        if "score_before" not in cols:
+            self._conn.execute(
+                "ALTER TABLE score_snapshots ADD COLUMN score_before REAL"
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -133,18 +153,20 @@ class SqliteStore:
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO users (user_id, group_id, group_priority, user_priority)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO users (user_id, group_id, group_priority, user_priority, user_name)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     group_id = excluded.group_id,
                     group_priority = excluded.group_priority,
-                    user_priority = excluded.user_priority
+                    user_priority = excluded.user_priority,
+                    user_name = excluded.user_name
                 """,
                 (
                     profile.user_id,
                     profile.group_id,
                     profile.group_priority,
                     profile.user_priority,
+                    (profile.user_name or "").strip(),
                 ),
             )
             self._conn.execute(
@@ -160,7 +182,7 @@ class SqliteStore:
     def get_profile(self, user_id: str) -> UserProfile | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT user_id, group_id, group_priority, user_priority FROM users WHERE user_id = ?",
+                "SELECT user_id, group_id, group_priority, user_priority, user_name FROM users WHERE user_id = ?",
                 (user_id,),
             ).fetchone()
         if row is None:
@@ -170,6 +192,9 @@ class SqliteStore:
             row["group_id"],
             group_priority=row["group_priority"],
             user_priority=row["user_priority"],
+            user_name=(row["user_name"] or "").strip()
+            if "user_name" in row.keys()
+            else "",
         )
 
     def _load_reward_grants(self, user_id: str) -> list[tuple]:
@@ -248,15 +273,25 @@ class SqliteStore:
             )
             self._conn.commit()
 
-    def recent_events(self, limit: int = 50) -> list[BehaviorEvent]:
+    def recent_events(self, limit: int = 50, *, user_id: str | None = None) -> list[BehaviorEvent]:
+        lim = max(1, min(limit, 500))
         with self._lock:
-            rows = self._conn.execute(
-                """
-                SELECT user_id, event_type, payload_json, timestamp
-                FROM events ORDER BY id DESC LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            if user_id and user_id.strip():
+                rows = self._conn.execute(
+                    """
+                    SELECT user_id, event_type, payload_json, timestamp
+                    FROM events WHERE user_id = ? ORDER BY id DESC LIMIT ?
+                    """,
+                    (user_id.strip(), lim),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT user_id, event_type, payload_json, timestamp
+                    FROM events ORDER BY id DESC LIMIT ?
+                    """,
+                    (lim,),
+                ).fetchall()
         out: list[BehaviorEvent] = []
         for r in rows:
             payload = json.loads(r["payload_json"] or "{}")
@@ -273,7 +308,7 @@ class SqliteStore:
     def list_profiles(self) -> list[UserProfile]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT user_id, group_id, group_priority, user_priority FROM users ORDER BY user_id"
+                "SELECT user_id, group_id, group_priority, user_priority, user_name FROM users ORDER BY user_id"
             ).fetchall()
         return [
             UserProfile(
@@ -281,6 +316,7 @@ class SqliteStore:
                 r["group_id"],
                 group_priority=r["group_priority"],
                 user_priority=r["user_priority"],
+                user_name=(r["user_name"] or "").strip(),
             )
             for r in rows
         ]
@@ -466,16 +502,27 @@ class SqliteStore:
         event_type: str,
         detail: str,
         applied: bool,
+        *,
+        score_before: float | None = None,
     ) -> None:
         now = self._dt_to_str(utcnow())
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO score_snapshots
-                    (user_id, score, tier, event_type, detail, applied, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (user_id, score, score_before, tier, event_type, detail, applied, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, score, tier, event_type, detail, 1 if applied else 0, now),
+                (
+                    user_id,
+                    score,
+                    score_before,
+                    tier,
+                    event_type,
+                    detail,
+                    1 if applied else 0,
+                    now,
+                ),
             )
             self._conn.commit()
 
@@ -484,7 +531,7 @@ class SqliteStore:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT user_id, score, tier, event_type, detail, applied, created_at
+                SELECT user_id, score, score_before, tier, event_type, detail, applied, created_at
                 FROM score_snapshots
                 WHERE user_id = ?
                 ORDER BY id DESC
@@ -492,10 +539,11 @@ class SqliteStore:
                 """,
                 (user_id, lim),
             ).fetchall()
-        return [
+        base = [
             {
                 "user_id": r["user_id"],
                 "score": r["score"],
+                "score_before": r["score_before"],
                 "tier": r["tier"],
                 "event_type": r["event_type"],
                 "detail": r["detail"],
@@ -504,6 +552,7 @@ class SqliteStore:
             }
             for r in rows
         ]
+        return _attach_score_deltas(base)
 
     def clear_all_data(self) -> None:
         """Delete every row (users, scores, events, groups, tenant config, history)."""

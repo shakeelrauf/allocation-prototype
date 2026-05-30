@@ -1,0 +1,9 @@
+.venv/
+ui/node_modules/
+ui/dist/
+data/
+.git/
+.pytest_cache/
+__pycache__/
+*.pyc
+static/

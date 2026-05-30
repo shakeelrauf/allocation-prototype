@@ -10,6 +10,7 @@ import {
 } from "chart.js";
 import { Bar, Doughnut } from "react-chartjs-2";
 import { useData } from "../context/DataContext";
+import { formatUserLabel } from "../utils/userDisplay";
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, ArcElement, Title, Tooltip, Legend);
 
@@ -61,7 +62,7 @@ export function DashboardCharts() {
             <div className="chart-canvas-wrap" id="wrap-chart-scores">
               <Bar
                 data={{
-                  labels: sorted.map((u) => u.user_id),
+                  labels: sorted.map((u) => formatUserLabel(u.user_id, u.user_name)),
                   datasets: [
                     {
                       label: "Score",

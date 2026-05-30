@@ -1,9 +1,9 @@
 import json
 from unittest.mock import patch
 
-from llm_explain import enrich_with_llm, gather_llm_store_snapshot, llm_feature_flags, template_explanation
-from models import BehaviorEvent, EventType, UserProfile
-from store import InMemoryStore
+from newton3.services.llm_explain import enrich_with_llm, gather_llm_store_snapshot, llm_feature_flags, template_explanation
+from newton3.domain.models import BehaviorEvent, EventType, UserProfile
+from newton3.persistence.store import InMemoryStore
 
 
 def test_template_when_no_llm_env(monkeypatch):
@@ -61,7 +61,7 @@ def test_llm_feature_flags_auto_ollama(monkeypatch):
         def __exit__(self, *args):
             return False
 
-    with patch("llm_explain.urlopen", return_value=FakeResp()):
+    with patch("newton3.services.llm_explain.urlopen", return_value=FakeResp()):
         f = llm_feature_flags()
     assert f["llm_explain_env"] is True
     assert f["llm_backend"] == "ollama"
@@ -97,7 +97,7 @@ def test_enrich_auto_ollama_when_probe_ok(monkeypatch):
             return FakeResp(payload)
         raise AssertionError(url)
 
-    with patch("llm_explain.urlopen", side_effect=fake_open):
+    with patch("newton3.services.llm_explain.urlopen", side_effect=fake_open):
         out = enrich_with_llm(ranking)
 
     assert out["mode"] == "ollama"
@@ -134,7 +134,7 @@ def test_enrich_multiturn_includes_history(monkeypatch):
         return FakeResp()
 
     hist = [{"role": "user", "content": "First question"}, {"role": "assistant", "content": "First answer"}]
-    with patch("llm_explain.urlopen", side_effect=fake_open):
+    with patch("newton3.services.llm_explain.urlopen", side_effect=fake_open):
         out = enrich_with_llm(ranking, messages=hist, follow_up="Why x?")
 
     assert out["mode"] == "ollama"
@@ -167,7 +167,7 @@ def test_ollama_used_when_url_set(monkeypatch):
         def __exit__(self, *args):
             return False
 
-    with patch("llm_explain.urlopen", return_value=FakeResp()):
+    with patch("newton3.services.llm_explain.urlopen", return_value=FakeResp()):
         out = enrich_with_llm(ranking)
 
     assert out["mode"] == "ollama"
@@ -194,7 +194,7 @@ def test_ollama_json_blob_replaced_with_template(monkeypatch):
         def __exit__(self, *args):
             return False
 
-    with patch("llm_explain.urlopen", return_value=FakeResp()):
+    with patch("newton3.services.llm_explain.urlopen", return_value=FakeResp()):
         out = enrich_with_llm(ranking)
 
     assert out["mode"] == "ollama"

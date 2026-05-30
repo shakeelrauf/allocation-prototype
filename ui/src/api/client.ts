@@ -12,6 +12,33 @@ export function usersBehaviorScoreUrl(userId: string): string {
   return ORIGIN_BASE ? `${ORIGIN_BASE}${path}` : path;
 }
 
+export async function postFormJson<T>(url: string, form: FormData): Promise<T> {
+  const res = await fetch(url, { method: "POST", body: form });
+  const text = await res.text();
+  let body: unknown = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = text;
+  }
+  if (!res.ok) {
+    let msg = text;
+    if (typeof body === "object" && body !== null && "detail" in body) {
+      const d = (body as { detail: unknown }).detail;
+      if (typeof d === "string") {
+        msg = d;
+      } else if (typeof d === "object" && d !== null) {
+        const detail = d as { errors?: string[] };
+        msg = detail.errors?.join("; ") ?? JSON.stringify(d);
+      } else {
+        msg = JSON.stringify(d);
+      }
+    }
+    throw new Error(msg || res.statusText);
+  }
+  return body as T;
+}
+
 export async function fetchJson<T>(url: string, opts?: RequestInit): Promise<T> {
   const res = await fetch(url, opts);
   const text = await res.text();

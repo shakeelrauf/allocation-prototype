@@ -1,6 +1,6 @@
 import pytest
 
-import llm_explain
+import newton3.services.llm_explain as llm_explain
 
 
 @pytest.fixture(autouse=True)

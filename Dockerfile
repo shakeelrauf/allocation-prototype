@@ -17,9 +17,8 @@ ENV PYTHONUNBUFFERED=1 \
 COPY requirements-docker.txt .
 RUN pip install --no-cache-dir -r requirements-docker.txt
 
-COPY allocation_engine.py api.py cli.py event_processor.py insights.py \
-    llm_explain.py models.py observability.py run_local.py scoring_engine.py \
-    shadow_engine.py sqlite_store.py store.py tenant_weights.py ./
+COPY newton3/ ./newton3/
+COPY run_local.py cli.py ./
 
 COPY --from=ui-build /ui/dist ./ui/dist
 
@@ -27,4 +26,4 @@ RUN mkdir -p /data
 ENV NEWTON3_DB_PATH=/data/newton3.db
 
 EXPOSE 8765
-CMD ["sh", "-c", "mkdir -p /data && exec uvicorn api:app --host 0.0.0.0 --port 8765"]
+CMD ["sh", "-c", "mkdir -p /data && exec uvicorn newton3.api.app:app --host 0.0.0.0 --port 8765"]

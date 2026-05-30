@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from models import Tier, UserScoreState, tier_for_score, utcnow
-from tenant_weights import TenantWeights
+from newton3.domain.models import Tier, UserScoreState, tier_for_score, utcnow
+from newton3.domain.tenant_weights import TenantWeights
 
 BASE_SCORE = 100.0
 MIN_SCORE = 0.0

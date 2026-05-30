@@ -1,92 +1,43 @@
 import { useState } from "react";
-import { fetchJson } from "../api/client";
+import { API, fetchJson } from "../api/client";
 import { useData } from "../context/DataContext";
+import { AllocationResultFlow, AllocationSetupFlow } from "./AllocationFlowVisual";
+import { UserLabel } from "../utils/userDisplay";
+
+type AllocRow = {
+  rank: number;
+  user_id: string;
+  user_name?: string;
+  got_parking?: boolean;
+  parking_slot?: number | null;
+  behavior_score?: number;
+  tier?: string;
+  summary?: string;
+};
+
+type AllocateResponse = {
+  allocation_id?: number;
+  capacity: number;
+  pool_size: number;
+  seed?: number | null;
+  how_it_works?: string;
+  assigned: AllocRow[];
+  waiting: AllocRow[];
+  waiting_total: number;
+};
 
 export function AllocationTab() {
-  const {
-    API,
-    health,
-    users,
-    allocChecked,
-    setAllocChecked,
-    getPoolUserIds,
-    allocationRuns,
-    loadAllocationRuns,
-  } = useData();
+  const { users, allocChecked, setAllocChecked, getPoolUserIds, allocationRuns, loadAllocationRuns, formatUser } =
+    useData();
   const [seed, setSeed] = useState(42);
   const [capacity, setCapacity] = useState(2);
-  const [rankRows, setRankRows] = useState<
-    { rank: number; user_id: string; behavior_score?: number; tier?: string; explain: string }[]
-  >([]);
-  const [rankErr, setRankErr] = useState("");
-  const [allocHtml, setAllocHtml] = useState<{ ok: boolean; html: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [result, setResult] = useState<AllocateResponse | null>(null);
+  const [showPoolPicker, setShowPoolPicker] = useState(false);
 
-  const idsParam = () => getPoolUserIds().join(",");
-
-  async function runRank() {
-    const ids = idsParam();
-    setRankErr("");
-    setRankRows([]);
-    if (!ids) {
-      setRankErr("No users in pool.");
-      return;
-    }
-    try {
-      const rank = await fetchJson<{
-        ranking: {
-          rank: number;
-          user_id: string;
-          behavior_score?: number;
-          tier?: string;
-          explain: string;
-        }[];
-      }>(
-        `${API}/allocation/rank?user_ids=${encodeURIComponent(ids)}&seed=${seed}&include_scores=1`,
-      );
-      setRankRows(rank.ranking || []);
-    } catch (e) {
-      setRankErr(String(e instanceof Error ? e.message : e));
-    }
-  }
-
-  async function runAllocate() {
-    const ids = idsParam();
-    const cap = Math.max(1, capacity || 1);
-    if (!ids) {
-      setAllocHtml({ ok: false, html: "No users in pool." });
-      return;
-    }
-    try {
-      const alloc = await fetchJson<{
-        allocation_id?: number;
-        winners: {
-          rank: number;
-          user_id: string;
-          behavior_score: number;
-          tier: string;
-        }[];
-      }>(
-        `${API}/allocation/allocate?user_ids=${encodeURIComponent(ids)}&capacity=${cap}&seed=${seed}`,
-      );
-      const lines = (alloc.winners || []).map(
-        (w) =>
-          `#${w.rank} ${w.user_id} · score ${Number(w.behavior_score).toFixed(2)} (${w.tier})`,
-      );
-      const saved =
-        alloc.allocation_id != null
-          ? `<br><span class="muted small">Saved as allocation run #${alloc.allocation_id} · GET /api/allocations · GET /api/allocation/runs/${alloc.allocation_id}</span>`
-          : "";
-      setAllocHtml({
-        ok: true,
-        html:
-          `<strong>${alloc.winners.length} winner(s) / capacity ${cap}</strong>${saved}<br>` +
-          lines.join("<br>"),
-      });
-      await loadAllocationRuns();
-    } catch (e) {
-      setAllocHtml({ ok: false, html: String(e instanceof Error ? e.message : e) });
-    }
-  }
+  const poolIds = getPoolUserIds();
+  const poolCount = poolIds.length;
 
   function toggleAll(on: boolean) {
     setAllocChecked((prev) => {
@@ -96,24 +47,81 @@ export function AllocationTab() {
     });
   }
 
+  async function runAllocation() {
+    if (!poolCount) {
+      setErr("Import users first (Dashboard → CSV), or select who competes below.");
+      setResult(null);
+      return;
+    }
+    const cap = Math.max(1, capacity || 1);
+    setBusy(true);
+    setErr("");
+    setResult(null);
+    try {
+      const alloc = await fetchJson<AllocateResponse>(
+        `${API}/allocation/allocate?user_ids=${encodeURIComponent(poolIds.join(","))}&capacity=${cap}&seed=${seed}&wait_limit=0`,
+      );
+      setResult(alloc);
+      await loadAllocationRuns();
+    } catch (e) {
+      setErr(String(e instanceof Error ? e.message : e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="grid-inner">
-        <article className="card wide">
-          <h2>Pool &amp; seed</h2>
-          {health?.sqlite_path ? (
-            <p className="muted small mono">
-              SQLite file (survives browser refresh): {health.sqlite_path}
-            </p>
-          ) : health && health.store !== "SqliteStore" ? (
-            <p className="muted small">
-              Backend store is <strong>{health.store}</strong> — allocations are not written to a local DB file.
-              Run <code className="mono">python run_local.py</code> for SQLite persistence.
-            </p>
-          ) : null}
-          <p className="muted small">
-            Choose who competes for spaces. Lower group priority value = higher preferred group.
-          </p>
-          <div className="pick-grid">
+      <article className="card wide allocation-hero">
+        <h2>Who gets parking today?</h2>
+        <p className="muted small">
+          Each <strong>parking booking</strong> is one physical space. Newton lines everyone up,
+          then the first in line get Space #1, #2, and so on.
+        </p>
+        <AllocationSetupFlow poolCount={poolCount} capacity={capacity} busy={busy} />
+      </article>
+
+      <article className="card wide">
+        <div className="row-inline wrap">
+          <label className="inline stack-tight">
+            <span className="muted small">Parking spaces available</span>
+            <input
+              className="w-short"
+              type="number"
+              min={1}
+              max={99}
+              value={capacity}
+              onChange={(e) => setCapacity(Number(e.target.value) || 1)}
+            />
+          </label>
+          <label className="inline stack-tight">
+            <span className="muted small">Seed (same seed = same order)</span>
+            <input
+              className="w-short"
+              type="number"
+              value={seed}
+              onChange={(e) => setSeed(Number(e.target.value))}
+            />
+          </label>
+          <button type="button" onClick={() => void runAllocation()} disabled={busy || !poolCount}>
+            {busy ? "Assigning…" : "Assign parking spaces"}
+          </button>
+        </div>
+
+        <p className="muted small mt">
+          {poolCount} drivers in pool
+          {poolCount !== users.length ? ` (${users.length} total in system)` : ""}.
+          <button
+            type="button"
+            className="linkish ml"
+            onClick={() => setShowPoolPicker((v) => !v)}
+          >
+            {showPoolPicker ? "Hide list" : "Change who competes"}
+          </button>
+        </p>
+
+        {showPoolPicker ? (
+          <div className="pick-grid mt">
             {users.map((u) => (
               <label key={u.user_id}>
                 <input
@@ -123,131 +131,107 @@ export function AllocationTab() {
                     setAllocChecked((p) => ({ ...p, [u.user_id]: e.target.checked }))
                   }
                 />{" "}
-                {u.user_id}
+                <UserLabel userId={u.user_id} userName={u.user_name} />
               </label>
             ))}
+            <div className="row-inline mt">
+              <button type="button" className="secondary sm" onClick={() => toggleAll(true)}>
+                Everyone
+              </button>
+              <button type="button" className="secondary sm" onClick={() => toggleAll(false)}>
+                Clear
+              </button>
+            </div>
           </div>
-          <div className="row-inline mt">
-            <button type="button" className="secondary sm" onClick={() => toggleAll(true)}>
-              Select all
-            </button>
-            <button type="button" className="secondary sm" onClick={() => toggleAll(false)}>
-              Clear
-            </button>
-            <label className="inline">
-              Seed
-              <input className="w-short" type="number" value={seed} onChange={(e) => setSeed(Number(e.target.value))} />
-            </label>
-          </div>
-        </article>
+        ) : null}
 
-        <article className="card">
-          <h2>Full ranking</h2>
-          <button type="button" onClick={() => void runRank()}>
-            Compute ranking
-          </button>
-          <div className="table-wrap mt">
-            <table id="tbl-rank">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>User</th>
-                  <th>Score</th>
-                  <th>Tier</th>
-                  <th>Explain</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rankErr ? (
-                  <tr>
-                    <td colSpan={5}>{rankErr}</td>
-                  </tr>
-                ) : (
-                  rankRows.map((r) => (
-                    <tr key={r.rank + r.user_id}>
-                      <td>{r.rank}</td>
-                      <td>{r.user_id}</td>
-                      <td>{r.behavior_score != null ? Number(r.behavior_score).toFixed(2) : ""}</td>
-                      <td>{r.tier ?? ""}</td>
-                      <td>{r.explain}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </article>
+        {err ? <p className="callout err mt">{err}</p> : null}
+      </article>
 
-        <article className="card">
-          <h2>Allocate capacity</h2>
-          <label className="stack">
-            Spaces available
-            <input
-              type="number"
-              min={1}
-              max={99}
-              value={capacity}
-              onChange={(e) => setCapacity(Number(e.target.value))}
-            />
-          </label>
-          <button type="button" className="mt" onClick={() => void runAllocate()}>
-            Run allocation
-          </button>
-          {allocHtml && (
-            <div
-              className={`callout mt ${allocHtml.ok ? "ok" : "err"}`}
-              dangerouslySetInnerHTML={{ __html: allocHtml.html }}
-            />
-          )}
-        </article>
+      {result ? (
+        <>
+          <article className="card wide">
+            <AllocationResultFlow result={result} />
+          </article>
 
+          <article className="card wide allocation-outcome assigned">
+            <div className="allocation-outcome-header">
+              <h2>
+                Got parking ({result.assigned.length} of {result.capacity} space
+                {result.capacity === 1 ? "" : "s"})
+              </h2>
+              <span className="allocation-outcome-pointer win">
+                Top {result.capacity} in the ranked list → these bookings
+              </span>
+            </div>
+            {result.assigned.length === 0 ? (
+              <p className="muted">No spaces assigned — check capacity or pool.</p>
+            ) : (
+              <ul className="allocation-list">
+                {result.assigned.map((w) => (
+                  <li key={w.user_id} className="allocation-list-item">
+                    <div className="allocation-list-head">
+                      <span className="badge on">
+                        Space {w.parking_slot ?? w.rank}
+                      </span>
+                      <strong>
+                        <UserLabel userId={w.user_id} userName={w.user_name} />
+                      </strong>
+                      {w.tier ? <span className="badge">{w.tier}</span> : null}
+                      {w.behavior_score != null ? (
+                        <span className="muted small">Score {Number(w.behavior_score).toFixed(0)}</span>
+                      ) : null}
+                    </div>
+                    <p className="allocation-summary">{w.summary}</p>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {result.allocation_id != null ? (
+              <p className="muted small mt">Saved as run #{result.allocation_id}</p>
+            ) : null}
+            {result.waiting_total > 0 ? (
+              <p className="muted small mt">
+                {result.waiting_total} other driver{result.waiting_total === 1 ? "" : "s"} in the
+                pool did not get a space this run (not listed here).
+              </p>
+            ) : null}
+          </article>
+        </>
+      ) : null}
+
+      {allocationRuns.length > 0 ? (
         <article className="card wide">
-          <div className="row-inline" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
-            <h2>Saved allocation runs</h2>
-            <button type="button" className="secondary sm" onClick={() => void loadAllocationRuns()}>
-              Refresh list
-            </button>
-          </div>
-          <p className="muted small">
-            Loaded from the API after each page load. Run allocation above to append a new saved row.
-          </p>
-          <div className="table-wrap mt">
+          <h2>Previous runs</h2>
+          <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Run</th>
-                  <th>When (UTC)</th>
-                  <th>Seed</th>
-                  <th>Cap</th>
-                  <th>Winners</th>
+                  <th>When</th>
+                  <th>Spaces</th>
+                  <th>Who got parking</th>
                 </tr>
               </thead>
               <tbody>
-                {allocationRuns.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="muted">
-                      No saved runs yet — use “Run allocation” or check that the API uses SqliteStore.
+                {allocationRuns.slice(0, 8).map((r) => (
+                  <tr key={r.id}>
+                    <td className="small">{r.created_at?.replace("T", " ").slice(0, 19)}</td>
+                    <td>{r.capacity}</td>
+                    <td>
+                      {(r.winners || [])
+                        .map(
+                          (w) =>
+                            `Space ${w.rank}: ${formatUser(w.user_id, w.user_name)}`,
+                        )
+                        .join(" · ") || "—"}
                     </td>
                   </tr>
-                ) : (
-                  allocationRuns.map((r) => (
-                    <tr key={r.id}>
-                      <td className="mono">#{r.id}</td>
-                      <td className="mono small">{r.created_at}</td>
-                      <td>{r.seed ?? "—"}</td>
-                      <td>{r.capacity}</td>
-                      <td>
-                        {(r.winners || [])
-                          .map((w) => `#${w.rank} ${w.user_id}`)
-                          .join(", ") || "—"}
-                      </td>
-                    </tr>
-                  ))
-                )}
+                ))}
               </tbody>
             </table>
           </div>
         </article>
-      </div>
+      ) : null}
+    </div>
   );
 }

@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
-from models import UserScoreState, utcnow
-from scoring_engine import (
+from newton3.domain.models import UserScoreState, utcnow
+from newton3.domain.scoring_engine import (
     BASE_SCORE,
     REWARD_CAP_TOTAL,
     apply_carpool_reward,

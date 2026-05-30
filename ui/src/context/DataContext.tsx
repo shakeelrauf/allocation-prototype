@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { API, fetchJson } from "../api/client";
+import { formatUserLabel } from "../utils/userDisplay";
 import type {
   AllocationRunRow,
   EventRow,
@@ -33,6 +34,7 @@ type Ctx = {
   reloadAll: () => Promise<void>;
   resetAll: () => Promise<void>;
   getPoolUserIds: () => string[];
+  formatUser: (userId: string, userName?: string | null) => string;
 };
 
 const DataContext = createContext<Ctx | null>(null);
@@ -128,6 +130,20 @@ export function DataProvider({ children }: { children: ReactNode }) {
     return selected.length ? selected : users.map((u) => u.user_id);
   }, [users, allocChecked]);
 
+  const userNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const u of users) {
+      if (u.user_name?.trim()) m.set(u.user_id, u.user_name.trim());
+    }
+    return m;
+  }, [users]);
+
+  const formatUser = useCallback(
+    (userId: string, userName?: string | null) =>
+      formatUserLabel(userId, userName ?? userNameById.get(userId)),
+    [userNameById],
+  );
+
   const value = useMemo(
     () =>
       ({
@@ -147,6 +163,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
         reloadAll,
         resetAll,
         getPoolUserIds,
+        formatUser,
       }) satisfies Ctx,
     [
       health,
@@ -162,6 +179,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       reloadAll,
       resetAll,
       getPoolUserIds,
+      formatUser,
     ],
   );
 

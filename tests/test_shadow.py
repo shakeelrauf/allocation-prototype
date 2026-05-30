@@ -1,8 +1,8 @@
-from allocation_engine import rank_users
-from event_processor import seed_users
-from models import UserProfile
-from shadow_engine import rank_legacy
-from store import InMemoryStore
+from newton3.domain.allocation_engine import rank_users
+from newton3.domain.event_processor import seed_users
+from newton3.domain.models import UserProfile
+from newton3.domain.shadow_engine import rank_legacy
+from newton3.persistence.store import InMemoryStore
 
 
 def test_shadow_diff_detects_reorder_when_behaviour_differs():

@@ -21,7 +21,7 @@ import { UserScorePage } from "./pages/UserScorePage";
 const NAV = [
   { to: "/dashboard", label: "Dashboard" },
   { to: "/events", label: "Events" },
-  { to: "/allocation", label: "Allocation" },
+  { to: "/allocation", label: "Parking" },
   { to: "/intel", label: "Explain & AI" },
   { to: "/reports", label: "Reports" },
   { to: "/admin", label: "Tenant admin" },

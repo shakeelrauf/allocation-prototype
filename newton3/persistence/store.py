@@ -5,7 +5,27 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Protocol, runtime_checkable
 
-from models import AllocationResult, BehaviorEvent, UserProfile, UserScoreState, tier_for_score, utcnow
+from newton3.domain.models import AllocationResult, BehaviorEvent, UserProfile, UserScoreState, tier_for_score, utcnow
+
+
+def _attach_score_deltas(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Newest-first rows; attach score_delta from score_before or previous snapshot."""
+    out: list[dict[str, Any]] = []
+    for i, row in enumerate(rows):
+        r = dict(row)
+        score = float(r["score"])
+        sb = r.get("score_before")
+        if sb is not None:
+            delta = score - float(sb)
+        elif i + 1 < len(rows):
+            delta = score - float(rows[i + 1]["score"])
+        else:
+            delta = 0.0
+        r["score_delta"] = round(delta, 2)
+        if sb is not None:
+            r["score_before"] = float(sb)
+        out.append(r)
+    return out
 
 
 @runtime_checkable
@@ -22,7 +42,7 @@ class ScoreStore(Protocol):
 
     def log_event(self, event: BehaviorEvent) -> None: ...
 
-    def recent_events(self, limit: int = 50) -> list[BehaviorEvent]: ...
+    def recent_events(self, limit: int = 50, *, user_id: str | None = None) -> list[BehaviorEvent]: ...
 
     def list_profiles(self) -> list[UserProfile]: ...
 
@@ -70,7 +90,7 @@ class InMemoryStore:
         ]
 
     def get_tenant_weights(self, group_id: str):
-        from tenant_weights import TenantWeights
+        from newton3.domain.tenant_weights import TenantWeights
 
         return self._tenant_weights.get(group_id, TenantWeights.default())
 
@@ -85,11 +105,14 @@ class InMemoryStore:
         event_type: str,
         detail: str,
         applied: bool,
+        *,
+        score_before: float | None = None,
     ) -> None:
         self._score_snapshots.append(
             {
                 "user_id": user_id,
                 "score": score,
+                "score_before": score_before,
                 "tier": tier,
                 "event_type": event_type,
                 "detail": detail,
@@ -100,7 +123,8 @@ class InMemoryStore:
 
     def list_score_history(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
         rows = [r for r in reversed(self._score_snapshots) if r["user_id"] == user_id]
-        return rows[: max(1, min(limit, 500))]
+        rows = rows[: max(1, min(limit, 500))]
+        return _attach_score_deltas(rows)
 
     def ensure_user(self, profile: UserProfile) -> None:
         self._profiles[profile.user_id] = profile
@@ -121,8 +145,13 @@ class InMemoryStore:
     def log_event(self, event: BehaviorEvent) -> None:
         self._event_log.append(event)
 
-    def recent_events(self, limit: int = 50) -> list[BehaviorEvent]:
-        chunk = self._event_log[-limit:]
+    def recent_events(self, limit: int = 50, *, user_id: str | None = None) -> list[BehaviorEvent]:
+        lim = max(1, limit)
+        if user_id:
+            uid = user_id.strip()
+            matched = [e for e in reversed(self._event_log) if e.user_id == uid]
+            return matched[:lim]
+        chunk = self._event_log[-lim:]
         return list(reversed(chunk))
 
     def list_profiles(self) -> list[UserProfile]:

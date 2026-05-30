@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useData } from "../context/DataContext";
+import { UserLabel } from "../utils/userDisplay";
 import { DashboardCharts } from "./DashboardCharts";
+import { RawCsvImport } from "./RawCsvImport";
 
 function tierBadgeClass(tier: string) {
   const t = tier.toLowerCase();
@@ -21,6 +23,8 @@ export function Dashboard({ onOpenGroup, onOpenUser, onScoreUser }: DashProps) {
 
   return (
     <div className="grid-inner">
+        <RawCsvImport onImported={() => reloadAll()} />
+
         <article className="card">
           <h2>Groups &amp; users</h2>
           <p className="muted small">
@@ -46,7 +50,15 @@ export function Dashboard({ onOpenGroup, onOpenUser, onScoreUser }: DashProps) {
             </div>
             <div>
               <dt>Users</dt>
-              <dd>{users.length}</dd>
+              <dd>
+                {users.length}
+                {users.length > 100 ? (
+                  <span className="muted small" title="Full list in table below">
+                    {" "}
+                    (all loaded)
+                  </span>
+                ) : null}
+              </dd>
             </div>
             <div>
               <dt>Events (loaded)</dt>
@@ -86,7 +98,9 @@ export function Dashboard({ onOpenGroup, onOpenUser, onScoreUser }: DashProps) {
               <tbody>
                 {users.map((u) => (
                   <tr key={u.user_id}>
-                    <td>{u.user_id}</td>
+                    <td>
+                      <UserLabel userId={u.user_id} userName={u.user_name} />
+                    </td>
                     <td>{u.group_id}</td>
                     <td>
                       {u.group_priority} / {u.user_priority}
@@ -146,7 +160,9 @@ export function Dashboard({ onOpenGroup, onOpenUser, onScoreUser }: DashProps) {
                   <tr key={`${ev.timestamp}-${i}`}>
                     <td>{ev.timestamp || ""}</td>
                     <td>{ev.event_type}</td>
-                    <td>{ev.user_id}</td>
+                    <td>
+                      <UserLabel userId={ev.user_id} userName={ev.user_name} />
+                    </td>
                     <td>
                       <code>{JSON.stringify(ev.payload || {})}</code>
                     </td>

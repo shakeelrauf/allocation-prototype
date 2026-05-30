@@ -1,9 +1,11 @@
-/** Human-readable presentation of /api/users/:id/insights payloads (+ collapsible raw JSON). */
+/** Plain-language risk readout for Explain & AI (technical JSON tucked away). */
 
-import { Fragment, type ReactNode } from "react";
+import type { ReactNode } from "react";
+import { formatUserLabel } from "../utils/userDisplay";
 
 export type ScoreAnomalyPayload = {
   user_id?: string;
+  user_name?: string;
   z_score?: number | null;
   population_mean?: number | null;
   population_stdev?: number | null;
@@ -23,6 +25,7 @@ export type NoShowRiskPayload = {
 
 export type EnsemblePayload = {
   user_id?: string;
+  user_name?: string;
   z_score?: number | null;
   z_flag?: boolean;
   no_show_risk?: number;
@@ -37,170 +40,232 @@ export type InsightsBundle = {
   ensemble: EnsemblePayload;
 };
 
-function fmtNum(n: number | null | undefined, digits = 2): string {
-  if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  return Number(n).toFixed(digits);
+type VerdictTone = "ok" | "watch" | "review";
+
+function driverName(data: { user_id?: string; user_name?: string }): string {
+  const id = data.user_id?.trim();
+  const name = data.user_name?.trim();
+  if (id) return formatUserLabel(id, name);
+  return "This driver";
 }
 
-function riskBand(r: number): { label: string; pill: "ok" | "warn" | "danger" } {
-  if (r < 0.28) return { label: "Low — typical pattern", pill: "ok" };
-  if (r < 0.48) return { label: "Moderate — keep an eye on bookings", pill: "warn" };
-  if (r < 0.68) return { label: "Elevated — consider outreach or rules review", pill: "danger" };
-  return { label: "High — prioritise review alongside other signals", pill: "danger" };
+function overallVerdict(bundle: InsightsBundle): {
+  tone: VerdictTone;
+  title: string;
+  summary: string;
+  action: string;
+} {
+  const flagged = !!bundle.ensemble.ensemble_flag;
+  const risk = bundle.no_show.estimated_no_show_risk_0_1 ?? 0;
+  const outlier = !!bundle.anomaly.flag_outlier;
+
+  if (flagged) {
+    return {
+      tone: "review",
+      title: "Worth a quick review",
+      summary:
+        "At least one check stood out — unusual score and/or several unused bookings in recent history.",
+      action: "Open their score history or speak with them before changing parking rules.",
+    };
+  }
+  if (risk >= 0.48 || outlier) {
+    return {
+      tone: "watch",
+      title: "Keep an eye on",
+      summary: outlier
+        ? "Their behaviour score is a bit different from most people on site."
+        : "Recent booking patterns suggest a moderate no-show / waste risk.",
+      action: "No urgent action — monitor the next few allocation runs.",
+    };
+  }
+  return {
+    tone: "ok",
+    title: "Looks typical",
+    summary: "Nothing in these quick checks is shouting for immediate intervention.",
+    action: "Use your normal parking policies; re-run after new events if behaviour changes.",
+  };
 }
 
-function RawDetails({ label, data }: { label: string; data: unknown }) {
-  return (
-    <details className="insight-raw">
-      <summary>{label}</summary>
-      <pre tabIndex={0}>{JSON.stringify(data, null, 2)}</pre>
-    </details>
-  );
-}
-
-function Pill({ className, children }: { className?: string; children: ReactNode }) {
-  return <span className={`insight-pill ${className || ""}`.trim()}>{children}</span>;
-}
-
-function DefinitionList({ rows }: { rows: [string, ReactNode][] }) {
-  return (
-    <dl className="insight-dl">
-      {rows.map(([k, v], i) => (
-        <Fragment key={`${k}-${i}`}>
-          <dt>{k}</dt>
-          <dd>{v}</dd>
-        </Fragment>
-      ))}
-    </dl>
-  );
-}
-
-function AnomalyCard({ data }: { data: ScoreAnomalyPayload }) {
-  const uid = data.user_id ?? "This driver";
-  const z = data.z_score;
+function scoreCheck(anomaly: ScoreAnomalyPayload): {
+  tone: VerdictTone;
+  headline: string;
+  detail: string;
+} {
+  const z = anomaly.z_score;
+  const score = anomaly.score;
+  const tier = anomaly.tier;
   const hasZ = z !== null && z !== undefined && !Number.isNaN(z);
 
-  const direction = hasZ ? (z >= 0 ? "above" : "below") : "";
-  const adverb = hasZ ? (Math.abs(z) >= 2 ? "well" : Math.abs(z) >= 1 ? "noticeably" : "slightly") : "";
-
-  const pills: ReactNode[] = [];
-  if (data.flag_outlier) pills.push(<Pill className="warn">Possible outlier vs peers — worth a manual glance</Pill>);
-  if (data.tier) pills.push(<Pill>Tier: {data.tier}</Pill>);
-
-  const rows: [string, ReactNode][] = [];
-  if (data.score !== null && data.score !== undefined) rows.push(["Their score", fmtNum(data.score)]);
-  if (data.population_mean !== null && data.population_mean !== undefined)
-    rows.push(["Average across pool", fmtNum(data.population_mean)]);
-  if (data.population_stdev !== null && data.population_stdev !== undefined)
-    rows.push(["Spread (stdev)", fmtNum(data.population_stdev)]);
-
-  return (
-    <section className="insight-human-card">
-      <h3>Compared with everyone else</h3>
-      <p className="insight-lede">
-        {data.note && !hasZ ? (
-          data.note
-        ) : hasZ ? (
-          <>
-            <strong>{uid}&apos;s behaviour score</strong> sits {adverb} <strong>{direction}</strong> the site average
-            — about <strong>{Math.abs(z).toFixed(2)}</strong> standard deviations. That&apos;s a statistical snapshot
-            across everyone registered here, not a verdict on character.
-          </>
-        ) : (
-          <>Not enough peers are registered yet to compute a stable comparison.</>
-        )}
-      </p>
-      {pills.length > 0 ? <div className="insight-pill-row">{pills}</div> : null}
-      {rows.length > 0 ? <DefinitionList rows={rows} /> : null}
-      <RawDetails label="View raw numbers (JSON)" data={data} />
-    </section>
-  );
+  if (anomaly.note && !hasZ) {
+    return {
+      tone: "watch",
+      headline: "Not enough people to compare",
+      detail: anomaly.note,
+    };
+  }
+  if (anomaly.flag_outlier) {
+    const dir = hasZ && z! > 0 ? "higher" : "lower";
+    return {
+      tone: "review",
+      headline: "Score stands out",
+      detail: `Behaviour score is unusually ${dir} than everyone else registered here${tier ? ` (${tier} tier)` : ""}.`,
+    };
+  }
+  if (hasZ && Math.abs(z!) >= 1) {
+    const dir = z! > 0 ? "above" : "below";
+    return {
+      tone: "watch",
+      headline: "Score a bit off average",
+      detail: `Sits ${dir} the typical site score${score != null ? ` — currently ${Number(score).toFixed(0)}` : ""}.`,
+    };
+  }
+  return {
+    tone: "ok",
+    headline: "Score looks normal",
+    detail: `In line with most drivers on site${score != null ? ` (score ${Number(score).toFixed(0)}${tier ? `, ${tier}` : ""})` : ""}.`,
+  };
 }
 
-function NoShowCard({ data }: { data: NoShowRiskPayload }) {
-  const risk = typeof data.estimated_no_show_risk_0_1 === "number" ? data.estimated_no_show_risk_0_1 : 0;
-  const band = riskBand(risk);
+function bookingCheck(noShow: NoShowRiskPayload): {
+  tone: VerdictTone;
+  headline: string;
+  detail: string;
+  pct: number;
+} {
+  const risk = typeof noShow.estimated_no_show_risk_0_1 === "number" ? noShow.estimated_no_show_risk_0_1 : 0;
   const pct = Math.round(Math.min(100, Math.max(0, risk * 100)));
-  const fillTone =
-    band.pill === "ok" ? "var(--insight-meter-ok, #2d6a4f)" : band.pill === "warn" ? "#b8892a" : "#a84848";
+  const unused = noShow.unused_booking_events_seen ?? 0;
+  const carpool = noShow.carpool_events_seen ?? 0;
 
-  const unused = data.unused_booking_events_seen ?? 0;
-  const carpool = data.carpool_events_seen ?? 0;
-
-  return (
-    <section className="insight-human-card">
-      <h3>No-show &amp; wasted booking risk</h3>
-      <p className="insight-lede">
-        A simple rolling check on recent events: unused bookings push risk up; carpool signals pull it down a bit.
-        Treat this as a <strong>planning hint</strong>, not a prediction that someone will skip a slot.
-      </p>
-      <div className="insight-meter-wrap">
-        <div className="insight-meter-label">
-          <span>Estimated risk index</span>
-          <span>
-            {pct}% · {band.label}
-          </span>
-        </div>
-        <div className="insight-meter-track" role="presentation">
-          <div className="insight-meter-fill" style={{ width: `${pct}%`, background: fillTone }} />
-        </div>
-      </div>
-      <DefinitionList
-        rows={[
-          ["Unused bookings seen (recent window)", String(unused)],
-          ["Carpool / rideshare signals", String(carpool)],
-          ["Model tag", data.model ?? "heuristic"],
-        ]}
-      />
-      <RawDetails label="View raw payload (JSON)" data={data} />
-    </section>
-  );
-}
-
-function EnsembleCard({ data }: { data: EnsemblePayload }) {
-  const flagged = !!data.ensemble_flag;
-  const reasons: string[] = [];
-  if (data.z_flag) reasons.push("the score looks unusual versus the rest of the population");
-  if (data.burst_unused_bookings) reasons.push("several unused bookings appeared in the recent stream");
-
-  let summary: string;
-  if (flagged) {
-    summary =
-      reasons.length > 0
-        ? `Together, Newton would flag this profile: ${reasons.join("; ")}.`
-        : "Newton would flag this profile based on the combined checks.";
-  } else {
-    summary =
-      "Nothing in these lightweight checks crosses the combined alert line — still apply your normal operational judgement.";
+  let tone: VerdictTone = "ok";
+  let headline = "Low booking-waste risk";
+  if (risk >= 0.68) {
+    tone = "review";
+    headline = "Higher waste / no-show risk";
+  } else if (risk >= 0.28) {
+    tone = "watch";
+    headline = "Some booking-waste risk";
   }
 
+  const parts = [`${unused} unused booking${unused === 1 ? "" : "s"} seen recently`];
+  if (carpool > 0) parts.push(`${carpool} carpool signal${carpool === 1 ? "" : "s"} (helps lower risk)`);
+
+  return {
+    tone,
+    headline,
+    detail: parts.join(" · ") + ". This is a rough hint, not a prediction they will skip parking.",
+    pct,
+  };
+}
+
+function alertCheck(ensemble: EnsemblePayload): { tone: VerdictTone; headline: string; detail: string } {
+  if (ensemble.ensemble_flag) {
+    const bits: string[] = [];
+    if (ensemble.z_flag) bits.push("unusual behaviour score");
+    if (ensemble.burst_unused_bookings) bits.push("cluster of unused bookings");
+    return {
+      tone: "review",
+      headline: "Combined alert",
+      detail:
+        bits.length > 0
+          ? `Newton flags this profile because: ${bits.join(" and ")}.`
+          : "Newton flags this profile when signals are combined.",
+    };
+  }
+  return {
+    tone: "ok",
+    headline: "No combined alert",
+    detail: "Score and booking checks together do not cross the alert line.",
+  };
+}
+
+function SignalRow({
+  step,
+  title,
+  tone,
+  headline,
+  detail,
+  extra,
+}: {
+  step: string;
+  title: string;
+  tone: VerdictTone;
+  headline: string;
+  detail: string;
+  extra?: ReactNode;
+}) {
   return (
-    <section className="insight-human-card">
-      <h3>Combined signal</h3>
-      <div className="insight-pill-row">
-        {flagged ? <Pill className="danger">Review suggested</Pill> : <Pill className="ok">No ensemble alert</Pill>}
+    <li className={`insights-signal insights-signal--${tone}`}>
+      <div className="insights-signal-step" aria-hidden>
+        {step}
       </div>
-      <p className="insight-lede">{summary}</p>
-      <DefinitionList
-        rows={[
-          ["Z-score flag", data.z_flag ? "Yes" : "No"],
-          ["Unused-booking burst", data.burst_unused_bookings ? "Yes" : "No"],
-          ["Risk index (same heuristic as card above)", fmtNum(data.no_show_risk, 3)],
-          ["Z-score (if available)", data.z_score === null || data.z_score === undefined ? "—" : fmtNum(data.z_score, 2)],
-        ]}
-      />
-      {data.note ? <p className="muted small insight-footnote">{data.note}</p> : null}
-      <RawDetails label="View raw payload (JSON)" data={data} />
-    </section>
+      <div className="insights-signal-body">
+        <span className="insights-signal-tag">{title}</span>
+        <strong className="insights-signal-headline">{headline}</strong>
+        <p className="insights-signal-detail">{detail}</p>
+        {extra}
+      </div>
+    </li>
   );
 }
 
 export function InsightsPanel({ bundle }: { bundle: InsightsBundle }) {
+  const verdict = overallVerdict(bundle);
+  const name = driverName(bundle.anomaly);
+  const score = scoreCheck(bundle.anomaly);
+  const booking = bookingCheck(bundle.no_show);
+  const alert = alertCheck(bundle.ensemble);
+
+  const meterColor =
+    booking.tone === "ok"
+      ? "#2d6a4f"
+      : booking.tone === "watch"
+        ? "#b0892e"
+        : "#a84848";
+
   return (
-    <div className="insights-human-grid">
-      <AnomalyCard data={bundle.anomaly} />
-      <NoShowCard data={bundle.no_show} />
-      <EnsembleCard data={bundle.ensemble} />
+    <div className="insights-simple">
+      <div className={`insights-verdict insights-verdict--${verdict.tone}`}>
+        <p className="insights-verdict-label">Overall for {name}</p>
+        <h3 className="insights-verdict-title">{verdict.title}</h3>
+        <p className="insights-verdict-summary">{verdict.summary}</p>
+        <p className="insights-verdict-action">
+          <span className="insights-verdict-arrow" aria-hidden>
+            →
+          </span>
+          {verdict.action}
+        </p>
+      </div>
+
+      <p className="muted small insights-simple-lead">
+        Three quick checks (same seed pool as Parking). Expand technical details only if you need
+        raw numbers.
+      </p>
+
+      <ol className="insights-signal-list">
+        <SignalRow step="1" title="Behaviour score" tone={score.tone} headline={score.headline} detail={score.detail} />
+        <SignalRow
+          step="2"
+          title="Booking habits"
+          tone={booking.tone}
+          headline={booking.headline}
+          detail={booking.detail}
+          extra={
+            <div className="insights-risk-bar" aria-hidden>
+              <div
+                className="insights-risk-bar-fill"
+                style={{ width: `${booking.pct}%`, background: meterColor }}
+              />
+            </div>
+          }
+        />
+        <SignalRow step="3" title="Combined" tone={alert.tone} headline={alert.headline} detail={alert.detail} />
+      </ol>
+
+      <details className="insight-raw insights-technical">
+        <summary>Technical details (for admins)</summary>
+        <pre tabIndex={0}>{JSON.stringify(bundle, null, 2)}</pre>
+      </details>
     </div>
   );
 }

@@ -6,11 +6,12 @@ proxies ``/api`` to this server (default :8765). Build for production: ``cd ui
 The React app uses client-side routes (e.g. ``/dashboard``, ``/events``); deep links
 need the built SPA (``html=True`` static mount).
 
-Ollama (optional): no Docker on Mac — ``./scripts/setup_local_llm.sh install-ollama`` then
-``native``; or use ``docker`` if you have Docker; then
-``python -m cli local-llm`` to print ``NEWTON3_LLM_*`` exports. Or set
-``NEWTON3_LLM_URL`` / ``NEWTON3_LLM_MODEL`` manually (see ``llm_explain`` docstring).
-Without Ollama (or auto-detect), allocation narrative falls back to template-only text.
+By default this script **starts Ollama automatically** if it is not already running
+(macOS: opens Ollama.app; otherwise ``ollama serve`` in the background). The API then
+auto-detects ``http://127.0.0.1:11434`` for Explain & AI. Use ``--no-ollama`` to skip,
+``--ollama-pull`` to pull the default model on startup (slow first time).
+
+Manual setup: ``./scripts/setup_local_llm.sh native`` or ``docker compose up`` (full stack).
 """
 
 from __future__ import annotations
@@ -30,14 +31,30 @@ def main() -> None:
         help="SQLite path (sets NEWTON3_DB_PATH); default: ./data/newton3.db",
     )
     parser.add_argument("--reload", action="store_true", help="Dev auto-reload")
+    parser.add_argument(
+        "--with-ollama",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Probe/start local Ollama before the API (default: on)",
+    )
+    parser.add_argument(
+        "--ollama-pull",
+        action="store_true",
+        help="Run `ollama pull` for NEWTON3_LLM_MODEL / llama3.2 after Ollama is up",
+    )
     args = parser.parse_args()
 
     if args.db:
         os.environ["NEWTON3_DB_PATH"] = str(Path(args.db).expanduser().resolve())
     elif not os.environ.get("NEWTON3_DB_PATH"):
-        from sqlite_store import default_sqlite_path
+        from newton3.persistence.sqlite_store import default_sqlite_path
 
         os.environ["NEWTON3_DB_PATH"] = str(default_sqlite_path().resolve())
+
+    if args.with_ollama:
+        from newton3.local_ollama import ensure_ollama_running
+
+        ensure_ollama_running(pull_model=args.ollama_pull)
 
     try:
         import uvicorn
@@ -46,11 +63,11 @@ def main() -> None:
             "Install uvicorn: pip install uvicorn[standard]"
         ) from e
 
-    target = "api:app"
+    target = "newton3.api.app:app"
     if args.reload:
-        uvicorn.run(target, host=args.host, port=args.port, reload=True)
+        uvicorn.run(target, host=args.host, port=args.port, reload=True, factory=False)
     else:
-        from api import create_app
+        from newton3.api.app import create_app
 
         uvicorn.run(create_app(), host=args.host, port=args.port, reload=False)
 

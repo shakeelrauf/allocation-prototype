@@ -5,8 +5,8 @@ from __future__ import annotations
 import random
 from typing import Sequence
 
-from models import AllocationResult, UserProfile
-from store import ScoreStore
+from newton3.domain.models import AllocationResult, UserProfile
+from newton3.persistence.store import ScoreStore
 
 
 def legacy_sort_key(profile: UserProfile, tie_breaker: float) -> tuple[int, int, float]:

@@ -1,190 +1,246 @@
-import { type FormEvent, useState } from "react";
-import { fetchJson } from "../api/client";
+import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { API, fetchJson } from "../api/client";
 import { useData } from "../context/DataContext";
+import type { EventRow } from "../types";
+import { UserSearchSelect } from "./UserSearchSelect";
+import { ScoreDeltaBadge } from "../utils/scoreDelta";
+import { UserLabel } from "../utils/userDisplay";
 
-const EVENT_TYPES = [
-  "booking.created",
-  "booking.cancelled",
-  "booking.completed",
-  "gate.entry_detected",
-  "offence.reported",
-  "carpool.detected",
-  "unused_booking",
-  "free_space_used",
-  "weekly_decay",
-];
+type EventLogResponse = {
+  applied?: boolean;
+  detail?: string;
+  score_before?: number;
+  score_after?: number;
+  score_delta?: number;
+  tier_before?: string;
+  tier_after?: string;
+};
+
+const EVENT_LABELS: Record<string, string> = {
+  "booking.created": "Booking created",
+  "booking.cancelled": "Booking cancelled",
+  "booking.completed": "Booking completed",
+  "gate.entry_detected": "Gate entry",
+  "offence.reported": "Offence / nudge",
+  "carpool.detected": "Carpool",
+  unused_booking: "Unused booking",
+  free_space_used: "Free space used",
+  weekly_decay: "Weekly decay",
+};
+
+const EVENT_TYPES = Object.keys(EVENT_LABELS);
+
+function eventLabel(type: string): string {
+  return EVENT_LABELS[type] || type;
+}
+
+function formatWhen(ts: string | null | undefined): string {
+  if (!ts) return "—";
+  return ts.replace("T", " ").slice(0, 19);
+}
 
 export function EventsTab() {
-  const { API, users, reloadAll } = useData();
-  const [payloadText, setPayloadText] = useState("");
-  const [eventType, setEventType] = useState(EVENT_TYPES[0]);
-  const [eventUser, setEventUser] = useState("");
-  const [eventResult, setEventResult] = useState<{ text: string; ok: boolean } | null>(null);
-  const [bulkText, setBulkText] = useState("");
-  const [bulkStatus, setBulkStatus] = useState("");
-  const [bulkResult, setBulkResult] = useState("");
+  const { users, reloadAll, formatUser } = useData();
+  const [selectedUserId, setSelectedUserId] = useState("");
+  const [events, setEvents] = useState<EventRow[]>([]);
+  const [eventsBusy, setEventsBusy] = useState(false);
+  const [eventsNote, setEventsNote] = useState("");
 
-  const defaultUser = users[0]?.user_id || "";
+  const [showLogForm, setShowLogForm] = useState(true);
+  const [eventType, setEventType] = useState("unused_booking");
+  const [logMsg, setLogMsg] = useState("");
+  const [logOk, setLogOk] = useState<boolean | null>(null);
+  const [lastLogDelta, setLastLogDelta] = useState<EventLogResponse | null>(null);
+
+  const loadEvents = useCallback(async () => {
+    setEventsBusy(true);
+    setEventsNote("");
+    try {
+      const params = new URLSearchParams({ limit: "80" });
+      if (selectedUserId) params.set("user_id", selectedUserId);
+      const data = await fetchJson<{ events: EventRow[] }>(
+        `${API}/events/recent?${params.toString()}`,
+      );
+      setEvents(data.events || []);
+      if (!data.events?.length) {
+        setEventsNote(
+          selectedUserId
+            ? "No events for this user yet — log one above."
+            : "No events yet — import users or log an event.",
+        );
+      }
+    } catch (e) {
+      setEvents([]);
+      setEventsNote(String(e instanceof Error ? e.message : e));
+    } finally {
+      setEventsBusy(false);
+    }
+  }, [selectedUserId]);
+
+  useEffect(() => {
+    void loadEvents();
+  }, [loadEvents]);
+
+  function onUserSelectChange(uid: string) {
+    setSelectedUserId(uid);
+    setLogMsg("");
+    setLogOk(null);
+    setLastLogDelta(null);
+  }
 
   async function submitEvent(e: FormEvent) {
     e.preventDefault();
-    let payload: Record<string, unknown> = {};
-    const raw = payloadText.trim();
-    try {
-      if (raw) payload = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      setEventResult({ text: "Invalid JSON in payload", ok: false });
+    const uid = selectedUserId || users[0]?.user_id;
+    if (!uid) {
+      setLogMsg("Import users first, then pick someone in Find a user.");
+      setLogOk(false);
       return;
     }
-    const uid = eventUser.trim() || defaultUser;
     try {
-      const res = await fetchJson(`${API}/events`, {
+      const res = await fetchJson<EventLogResponse>(`${API}/events`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ event_type: eventType, user_id: uid, payload }),
+        body: JSON.stringify({ event_type: eventType, user_id: uid, payload: {} }),
       });
-      setEventResult({ text: JSON.stringify(res, null, 2), ok: true });
+      setLogMsg(`Logged «${eventLabel(eventType)}» for ${formatUser(uid)}.`);
+      setLogOk(true);
+      setLastLogDelta(res);
       await reloadAll();
+      await loadEvents();
     } catch (err) {
-      setEventResult({ text: String(err instanceof Error ? err.message : err), ok: false });
+      setLogMsg(String(err instanceof Error ? err.message : err));
+      setLogOk(false);
+      setLastLogDelta(null);
     }
   }
 
-  async function runBulk() {
-    const raw = bulkText.trim();
-    if (!raw) {
-      setBulkStatus("Paste NDJSON first.");
-      return;
-    }
-    let events: unknown[];
-    try {
-      events = raw
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean)
-        .map((line) => JSON.parse(line));
-    } catch (e) {
-      setBulkStatus("Invalid JSON: " + String(e instanceof Error ? e.message : e));
-      return;
-    }
-    setBulkStatus(`Sending ${events.length} events…`);
-    try {
-      const res = await fetchJson<{ count: number }>(`${API}/events/bulk`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ events }),
-      });
-      setBulkStatus(`Done · ${res.count} processed`);
-      setBulkResult(JSON.stringify(res, null, 2));
-      await reloadAll();
-    } catch (err) {
-      setBulkStatus("Error");
-      setBulkResult(String(err instanceof Error ? err.message : err));
-    }
-  }
+  const filterLabel = selectedUserId
+    ? formatUser(selectedUserId, users.find((u) => u.user_id === selectedUserId)?.user_name)
+    : "Everyone";
+
+  const logTargetId = selectedUserId || users[0]?.user_id || "";
 
   return (
-    <div className="grid-inner">
-        <article className="card">
-          <h2>Send single event</h2>
-          <form className="stack" onSubmit={submitEvent}>
-            <label>
-              Event type
-              <select value={eventType} onChange={(e) => setEventType(e.target.value)}>
-                {EVENT_TYPES.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              User
-              <select
-                value={users.length === 0 ? "" : eventUser || defaultUser}
-                onChange={(e) => setEventUser(e.target.value)}
-                required
-                disabled={users.length === 0}
-              >
-                {users.length === 0 ? (
-                  <option value="">No users yet</option>
-                ) : (
-                  users.map((u) => (
-                    <option key={u.user_id} value={u.user_id}>
-                      {u.user_id} · {u.group_id}
-                    </option>
-                  ))
-                )}
-              </select>
-            </label>
-            <label>
-              Payload JSON
-              <textarea
-                rows={4}
-                value={payloadText}
-                onChange={(e) => setPayloadText(e.target.value)}
-                placeholder='{"weeks": 2}'
-              />
-            </label>
-            <div className="preset-row">
-              <span className="muted small">Presets:</span>
-              <button type="button" className="secondary sm" onClick={() => setPayloadText('{"weeks":1}')}>
-                weekly_decay ×1
-              </button>
-              <button type="button" className="secondary sm" onClick={() => setPayloadText('{"weeks":4}')}>
-                weekly_decay ×4
-              </button>
-              <button type="button" className="secondary sm" onClick={() => setPayloadText("")}>
-                clear payload
-              </button>
-            </div>
-            <button type="submit" disabled={users.length === 0}>
-              Process event
-            </button>
-          </form>
-          {eventResult && (
-            <div className={`callout mt ${eventResult.ok ? "ok" : "err"}`}>{eventResult.text}</div>
-          )}
-        </article>
+    <div className="grid-inner events-page">
+      <article className="card wide events-hero">
+        <h2>Behaviour events</h2>
+        <p className="muted small">
+          Pick a user from the list to filter the timeline, or choose <strong>Everyone</strong>. Log
+          new events at the top — newest first below.
+        </p>
+      </article>
 
-        <article className="card wide">
-          <h2>Event stream (NDJSON)</h2>
-          <p className="muted small">
-            One JSON object per line:
-            <code>{'{"event_type":"unused_booking","user_id":"bob","payload":{}}'}</code>
-          </p>
-          <textarea
-            className="mono"
-            rows={10}
-            value={bulkText}
-            onChange={(e) => setBulkText(e.target.value)}
-            placeholder='{"event_type":"carpool.detected","user_id":"alice","payload":{}}'
-          />
-          <div className="row-inline mt">
-            <button
-              type="button"
-              onClick={() => {
-                const lines = [
-                  { event_type: "booking.created", user_id: "alice", payload: {} },
-                  { event_type: "carpool.detected", user_id: "alice", payload: {} },
-                  { event_type: "unused_booking", user_id: "bob", payload: {} },
-                  { event_type: "weekly_decay", user_id: "bob", payload: { weeks: 2 } },
-                  { event_type: "offence.reported", user_id: "carol", payload: {} },
-                ];
-                setBulkText(lines.map((x) => JSON.stringify(x)).join("\n"));
-              }}
-            >
-              Insert sample stream
+      <article className="card wide events-log-card">
+        <button
+          type="button"
+          className="events-log-toggle"
+          onClick={() => setShowLogForm((v) => !v)}
+          aria-expanded={showLogForm}
+        >
+          {showLogForm ? "Hide" : "Log a new event"} →
+        </button>
+        {showLogForm ? (
+          <form className="events-log-form stack" onSubmit={submitEvent}>
+            <UserSearchSelect
+              label="Find a user"
+              value={selectedUserId}
+              onChange={onUserSelectChange}
+              users={users}
+              everyoneLabel="Everyone — all recent events"
+              hint="Type a name or user id, then pick from the list."
+            />
+
+            <div className="events-type-picker" role="group" aria-label="What happened?">
+              <span className="muted small events-type-picker-label">What happened?</span>
+              <div className="events-type-buttons">
+                {EVENT_TYPES.map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    className={`events-type-btn${eventType === t ? " events-type-btn--active" : ""}`}
+                    aria-pressed={eventType === t}
+                    onClick={() => setEventType(t)}
+                  >
+                    {eventLabel(t)}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <p className="muted small">
+              {selectedUserId ? (
+                <>
+                  Saving event for{" "}
+                  <UserLabel
+                    userId={selectedUserId}
+                    userName={users.find((u) => u.user_id === selectedUserId)?.user_name}
+                  />
+                </>
+              ) : (
+                <>Pick a specific user above to log an event for them (not Everyone).</>
+              )}
+            </p>
+
+            <button type="submit" disabled={users.length === 0 || !logTargetId || !selectedUserId}>
+              Save event
             </button>
-            <button type="button" className="secondary" onClick={() => void runBulk()}>
-              Run bulk (server-side)
-            </button>
-            <span className="muted small">{bulkStatus}</span>
-          </div>
-          {bulkResult && (
-            <pre className="mono muted scroll-max mt">{bulkResult}</pre>
-          )}
-        </article>
-      </div>
+            {logMsg ? (
+              <div className={`callout small ${logOk ? "ok" : "err"}`}>
+                <p className="events-log-msg">{logMsg}</p>
+                {logOk && lastLogDelta ? (
+                  <ScoreDeltaBadge
+                    delta={lastLogDelta.score_delta}
+                    scoreBefore={lastLogDelta.score_before}
+                    scoreAfter={lastLogDelta.score_after}
+                    tierAfter={lastLogDelta.tier_after}
+                  />
+                ) : null}
+              </div>
+            ) : null}
+          </form>
+        ) : null}
+      </article>
+
+      <article className="card wide">
+        <div className="events-timeline-head">
+          <h2 className="events-section-title">Timeline</h2>
+          <button
+            type="button"
+            className="secondary sm"
+            disabled={eventsBusy}
+            onClick={() => void loadEvents()}
+          >
+            {eventsBusy ? "Loading…" : "Refresh"}
+          </button>
+        </div>
+        <p className="muted small events-filter-line">
+          Showing events for: <strong>{filterLabel}</strong>
+          {events.length > 0 ? ` · ${events.length} recent` : ""}
+        </p>
+        {eventsNote && events.length === 0 ? <p className="muted">{eventsNote}</p> : null}
+        {events.length > 0 ? (
+          <ul className="events-timeline">
+            {events.map((ev, i) => (
+              <li key={`${ev.timestamp}-${ev.user_id}-${i}`} className="events-timeline-item">
+                <div className="events-timeline-main">
+                  <span className="events-timeline-when">{formatWhen(ev.timestamp)}</span>
+                  <span className="badge">{eventLabel(ev.event_type)}</span>
+                  <UserLabel userId={ev.user_id} userName={ev.user_name} />
+                </div>
+                {ev.score_delta != null || ev.score_after != null ? (
+                  <ScoreDeltaBadge
+                    delta={ev.score_delta}
+                    scoreBefore={ev.score_before}
+                    scoreAfter={ev.score_after}
+                    tierAfter={ev.tier_after}
+                    compact
+                  />
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </article>
+    </div>
   );
 }

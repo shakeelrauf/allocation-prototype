@@ -1,11 +1,12 @@
 import { useMemo } from "react";
+import { formatUserLabel } from "../utils/userDisplay";
 
 /** Shape some models return instead of Markdown (we render it nicely when detected). */
 export type NewtonNarrativeJson = {
   title: string;
   summary: string;
   bullets: string[];
-  rank_notes: { rank: number; user_id: string; note: string }[];
+  rank_notes: { rank: number; user_id: string; user_name?: string; note: string }[];
   fairness: string;
 };
 
@@ -24,13 +25,16 @@ function normalizeBullets(b: unknown): string[] {
   return out;
 }
 
-function normalizeRankNotes(x: unknown): { rank: number; user_id: string; note: string }[] {
+function normalizeRankNotes(
+  x: unknown,
+): { rank: number; user_id: string; user_name?: string; note: string }[] {
   if (!Array.isArray(x)) return [];
   return x
     .filter((r): r is Record<string, unknown> => r !== null && typeof r === "object")
     .map((r) => ({
       rank: typeof r.rank === "number" && !Number.isNaN(r.rank) ? r.rank : Number(r.rank) || 0,
       user_id: String(r.user_id ?? "").trim(),
+      user_name: typeof r.user_name === "string" ? r.user_name.trim() : undefined,
       note: typeof r.note === "string" ? r.note.trim() : "",
     }))
     .filter((r) => r.user_id.length > 0)
@@ -81,7 +85,7 @@ function NarrativeCard({ data }: { data: NewtonNarrativeJson }) {
           <ul className="llm-narrative-rank-list">
             {data.rank_notes.map((r) => (
               <li key={r.user_id + r.rank}>
-                <strong>#{r.rank}</strong> {r.user_id}
+                <strong>#{r.rank}</strong> {formatUserLabel(r.user_id, r.user_name)}
                 {r.note ? <span className="muted"> — {r.note}</span> : null}
               </li>
             ))}

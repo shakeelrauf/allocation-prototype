@@ -1,0 +1,440 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Newton 3 — hybrid serverless: Mangum console API, SQS scoring pipeline,
+  dedicated read + allocation Lambdas, DynamoDB.
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 30
+    MemorySize: 256
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        NEWTON3_STORE: dynamodb
+        NEWTON3_STACK: aws-sam
+        NEWTON3_API_STAGE: !Ref Stage
+        NEWTON3_DDB_USERS_TABLE: !Ref UsersScoresTable
+        NEWTON3_DDB_EVENTS_TABLE: !Ref BehaviorEventsTable
+        NEWTON3_DDB_TENANT_TABLE: !Ref TenantConfigTable
+        NEWTON3_DDB_GROUPS_TABLE: !Ref GroupsTable
+        NEWTON3_DDB_ALLOC_TABLE: !Ref AllocationRunsTable
+        NEWTON3_EVENTS_ASYNC: "true"
+        NEWTON3_EVENTS_HTTP_SYNC: "true"
+        NEWTON3_EVENTS_QUEUE_URL: !Ref BehaviorEventsQueue
+        NEWTON3_LOG_JSON: "1"
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+  EnablePITR:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  AdminEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Allow /api/admin/* on Console Lambda (set false in production)
+  BedrockModelId:
+    Type: String
+    Default: anthropic.claude-3-5-haiku-20241022-v1:0
+    Description: Foundation model for Explain & AI (enable in Bedrock console first)
+  LlmBackend:
+    Type: String
+    Default: bedrock
+    AllowedValues: ["bedrock", "off"]
+    Description: bedrock = Amazon Bedrock Converse on Console Lambda; off = template-only LLM
+
+Conditions:
+  UsePITR: !Equals [!Ref EnablePITR, "true"]
+  AdminOn: !Equals [!Ref AdminEnabled, "true"]
+  BedrockLlmOn: !Equals [!Ref LlmBackend, "bedrock"]
+
+Resources:
+  UsersScoresTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "newton3-${Stage}-users-scores"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [UsePITR, true, false]
+
+  BehaviorEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "newton3-${Stage}-behavior-events"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  TenantConfigTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "newton3-${Stage}-tenant-config"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  GroupsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "newton3-${Stage}-groups"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  AllocationRunsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "newton3-${Stage}-allocation-runs"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  NewtonEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub "newton3-${Stage}-events"
+
+  BehaviorEventsDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "newton3-${Stage}-behavior-events-dlq"
+      MessageRetentionPeriod: 1209600
+
+  BehaviorEventsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "newton3-${Stage}-behavior-events"
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt BehaviorEventsDLQ.Arn
+        maxReceiveCount: 5
+
+  BehaviorEventToQueueRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "newton3-${Stage}-behavior-to-sqs"
+      EventBusName: !Ref NewtonEventBus
+      EventPattern:
+        source:
+          - newton3.booking
+          - newton3.gate
+          - newton3.offence
+        detail-type:
+          - BehaviorEvent
+      Targets:
+        - Arn: !GetAtt BehaviorEventsQueue.Arn
+          Id: QueueTarget
+
+  BehaviorEventsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref BehaviorEventsQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowEventBridgeSend
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt BehaviorEventsQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt BehaviorEventToQueueRule.Arn
+
+  ScoringFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: python3.11
+      BuildProperties:
+        RequirementsFile: requirements-aws.txt
+    Properties:
+      FunctionName: !Sub "newton3-${Stage}-scoring"
+      CodeUri: ../../
+      Handler: aws/handlers/scoring.handler
+      Description: SQS worker — penalties, rewards, decay batches
+      Timeout: 60
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt BehaviorEventsQueue.QueueName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersScoresTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BehaviorEventsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TenantConfigTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GroupsTable
+      Events:
+        ScoringQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt BehaviorEventsQueue.Arn
+            BatchSize: 10
+
+  DecayScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "newton3-${Stage}-weekly-decay"
+      Description: Weekly score recovery (+2/week toward base)
+      ScheduleExpression: rate(7 days)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ScoringFunction.Arn
+          Id: DecayTarget
+          Input: '{"source":"newton3.decay","weeks":1}'
+
+  DecayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScoringFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DecayScheduleRule.Arn
+
+  AllocationFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: python3.11
+      BuildProperties:
+        RequirementsFile: requirements-aws.txt
+    Properties:
+      FunctionName: !Sub "newton3-${Stage}-allocation"
+      CodeUri: ../../
+      Handler: aws/handlers/allocation.handler
+      Description: Newton rank / allocate / shadow / explain (sync)
+      MemorySize: 512
+      Timeout: 60
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersScoresTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BehaviorEventsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TenantConfigTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GroupsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AllocationRunsTable
+      Events:
+        Rank:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref NewtonHttpApi
+            Path: /api/allocation/rank
+            Method: GET
+        Allocate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref NewtonHttpApi
+            Path: /api/allocation/allocate
+            Method: GET
+        Shadow:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref NewtonHttpApi
+            Path: /api/allocation/shadow
+            Method: GET
+        Explain:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref NewtonHttpApi
+            Path: /api/allocation/explain
+            Method: GET
+
+  ReadApiFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: python3.11
+      BuildProperties:
+        RequirementsFile: requirements-aws.txt
+    Properties:
+      FunctionName: !Sub "newton3-${Stage}-read-api"
+      CodeUri: ../../
+      Handler: aws/handlers/api.handler
+      Description: Low-latency WayID behaviour score reads
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersScoresTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref TenantConfigTable
+      Events:
+        Health:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref NewtonHttpApi
+            Path: /api/health
+            Method: GET
+        BehaviorScore:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref NewtonHttpApi
+            Path: /users/{user_id}/behavior-score
+            Method: GET
+        BehaviorScoreApiPrefix:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref NewtonHttpApi
+            Path: /api/users/{user_id}/behavior-score
+            Method: GET
+
+  ConsoleFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: python3.11
+      BuildProperties:
+        RequirementsFile: requirements-aws.txt
+    Properties:
+      FunctionName: !Sub "newton3-${Stage}-console"
+      CodeUri: ../../
+      Handler: aws/handlers/console.handler
+      Description: Full FastAPI operator API (Mangum) — events, users, reports, admin, Bedrock LLM
+      MemorySize: 1024
+      Timeout: 120
+      Environment:
+        Variables:
+          NEWTON3_ADMIN_ENABLED: !If [AdminOn, "true", "false"]
+          NEWTON3_LLM_AUTO: "0"
+          NEWTON3_LLM_BACKEND: !If [BedrockLlmOn, "bedrock", "off"]
+          NEWTON3_BEDROCK_MODEL_ID: !If [BedrockLlmOn, !Ref BedrockModelId, ""]
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt BehaviorEventsQueue.QueueName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersScoresTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BehaviorEventsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TenantConfigTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GroupsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AllocationRunsTable
+        - Statement:
+            - Sid: BedrockConverse
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:Converse
+              Resource:
+                - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/*"
+                - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*"
+      Events:
+        ConsoleApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref NewtonHttpApi
+            Path: /{proxy+}
+            Method: ANY
+        ConsoleApiRoot:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref NewtonHttpApi
+            Path: /
+            Method: ANY
+
+  ShadowCompareFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: python3.11
+      BuildProperties:
+        RequirementsFile: requirements-aws.txt
+    Properties:
+      FunctionName: !Sub "newton3-${Stage}-shadow-compare"
+      CodeUri: ../../
+      Handler: aws/handlers/shadow_compare.handler
+      Description: Parity check vs legacy/Rails export
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersScoresTable
+
+  NewtonHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Stage
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - PATCH
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - "*"
+
+Outputs:
+  HttpApiUrl:
+    Description: API base URL (Console proxy + dedicated read/allocation routes)
+    Value: !Sub "https://${NewtonHttpApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+  EventBusName:
+    Description: Custom EventBridge bus for behaviour events (targets SQS)
+    Value: !Ref NewtonEventBus
+  BehaviorEventsQueueUrl:
+    Description: SQS queue for async scoring worker
+    Value: !Ref BehaviorEventsQueue
+  UsersTable:
+    Value: !Ref UsersScoresTable
+  EventsTable:
+    Value: !Ref BehaviorEventsTable
+  ScoringFunctionArn:
+    Value: !GetAtt ScoringFunction.Arn
+  ConsoleFunctionArn:
+    Value: !GetAtt ConsoleFunction.Arn
+  BedrockModelId:
+    Description: Bedrock model for POST /api/allocation/explain-llm (Console Lambda)
+    Value: !Ref BedrockModelId
+  MigrationHint:
+    Description: Run migration script locally against deployed tables
+    Value: !Sub "python scripts/migrate_from_rails_export.py --backend dynamodb --stage ${Stage} --region ${AWS::Region}"

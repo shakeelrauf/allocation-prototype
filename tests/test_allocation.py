@@ -1,7 +1,12 @@
-from allocation_engine import allocate_spaces, rank_users
-from event_processor import seed_users
-from models import UserProfile
-from store import InMemoryStore
+from newton3.domain.allocation_engine import (
+    allocate_spaces,
+    allocation_explain_for_user,
+    build_allocation_outcome,
+    rank_users,
+)
+from newton3.domain.event_processor import seed_users
+from newton3.domain.models import UserProfile
+from newton3.persistence.store import InMemoryStore
 
 
 def _store_with_three() -> InMemoryStore:
@@ -77,3 +82,29 @@ def test_all_restricted_pool_still_allocates_among_themselves():
     store.get_score_state("y").score = 45.0
     got = allocate_spaces(store, ["x", "y"], capacity=1, seed=1)
     assert got[0].user_id == "x"  # better user_priority within Restricted-only pool
+
+
+def test_build_allocation_outcome_splits_assigned_and_waiting():
+    store = _store_with_three()
+    out = build_allocation_outcome(store, ["a", "b", "c"], capacity=2, seed=99)
+    assert out["pool_size"] == 3
+    assert len(out["assigned"]) == 2
+    assert all(r["got_parking"] for r in out["assigned"])
+    assert out["waiting_total"] == 1
+    assert out["waiting"][0]["got_parking"] is False
+    assert "summary" in out["assigned"][0]
+
+
+def test_explain_focus_detail_includes_scores_and_steps():
+    store = _store_with_three()
+    store.get_score_state("a").score = 130
+    store.get_score_state("b").score = 90
+    ex = allocation_explain_for_user(store, ["a", "b", "c"], "b", seed=99)
+    assert ex["rank"] == 2
+    fd = ex["focus_detail"]
+    assert fd["behavior_score"] == 90.0
+    assert fd["group_priority"] == 1
+    assert len(fd["calculation_steps"]) >= 6
+    assert ex["why_above"][0]["user_id"] == "a"
+    assert "reason" in ex["why_above"][0]
+    assert "their" in ex["why_above"][0]

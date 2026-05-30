@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from store import ScoreStore
+from newton3.persistence.store import ScoreStore
 
 
 @dataclass(frozen=True)

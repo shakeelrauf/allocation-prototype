@@ -1,10 +1,10 @@
 import tempfile
 from pathlib import Path
 
-from allocation_engine import allocate_spaces
-from models import BehaviorEvent, EventType, UserProfile, UserScoreState
-from sqlite_store import SqliteStore
-from store import InMemoryStore
+from newton3.domain.allocation_engine import allocate_spaces
+from newton3.domain.models import BehaviorEvent, EventType, UserProfile, UserScoreState
+from newton3.persistence.sqlite_store import SqliteStore
+from newton3.persistence.store import InMemoryStore
 
 
 def test_sqlite_roundtrip_scores_and_rewards():
